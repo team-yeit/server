@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LdDl/go-darknet"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -61,29 +60,20 @@ type AIResponse struct {
 }
 
 type UIAnalyzer struct {
-	yoloDetector   *darknet.YOLONetwork
-	openaiClient   *openai.Client
-	uiClassMapping map[string]string
-	yoloMutex      sync.Mutex // YOLO 전용 뮤텍스 (절대 동시 실행 방지)
-	yoloEnabled    bool
-	initialized    bool
+	openaiClient *openai.Client
+	initialized  bool
+	mu           sync.RWMutex
 }
 
 func NewUIAnalyzer() (*UIAnalyzer, error) {
-	log.Println("Initializing UI automation system with thread-safe YOLO implementation...")
+	log.Println("Initializing stable OpenCV-only UI automation system...")
 	startTime := time.Now()
 
-	// CGO 메모리 관리 최적화
-	debug.SetGCPercent(20)        // 더 빈번한 GC
-	debug.SetMemoryLimit(2 << 30) // 2GB 메모리 제한
+	// 메모리 최적화
+	debug.SetGCPercent(50)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	analyzer := &UIAnalyzer{
-		uiClassMapping: map[string]string{
-			"person": "icon", "book": "button", "laptop": "screen", "mouse": "button",
-			"keyboard": "input", "cell phone": "device", "tv": "screen", "remote": "button",
-		},
-		yoloEnabled: false,
 		initialized: false,
 	}
 
@@ -96,115 +86,34 @@ func NewUIAnalyzer() (*UIAnalyzer, error) {
 		log.Println("OpenAI client initialized successfully")
 	}
 
-	// YOLO 초기화 (격리된 환경에서)
-	if err := analyzer.initializeYOLO(); err != nil {
-		log.Printf("YOLO initialization failed: %v - continuing with OpenCV only", err)
-	}
-
 	analyzer.initialized = true
-	log.Printf("UI analyzer initialized in %v - YOLO: %t", time.Since(startTime), analyzer.yoloEnabled)
+	log.Printf("UI analyzer initialized in %v - OpenCV mode only", time.Since(startTime))
+	log.Println("YOLO disabled for stability - using advanced OpenCV detection")
+
 	return analyzer, nil
 }
 
-func (ua *UIAnalyzer) initializeYOLO() error {
-	// 파일 존재 확인
-	configPath := "cfg/yolov4.cfg"
-	weightsPath := "yolov4.weights"
-
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", configPath)
-	}
-	if _, err := os.Stat(weightsPath); os.IsNotExist(err) {
-		return fmt.Errorf("weights file not found: %s", weightsPath)
-	}
-
-	// 파일 크기 검증 (YOLOv4 weights는 약 245MB)
-	if stat, err := os.Stat(weightsPath); err == nil {
-		if stat.Size() < 200*1024*1024 { // 200MB 미만이면 손상된 파일
-			return fmt.Errorf("weights file too small: %d bytes", stat.Size())
-		}
-	}
-
-	// YOLO 네트워크 설정 (안전한 파라미터)
-	yoloDetector := &darknet.YOLONetwork{
-		GPUDeviceIndex:           -1, // CPU 모드로 시작 (안정성 우선)
-		NetworkConfigurationFile: configPath,
-		WeightsFile:              weightsPath,
-		Threshold:                0.3, // 더 높은 임계값으로 false positive 감소
-	}
-
-	// 초기화 시도 (패닉 복구)
-	var initErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				initErr = fmt.Errorf("YOLO initialization panic: %v", r)
-			}
-		}()
-
-		// 메모리 정렬 보장
-		runtime.GC()
-		initErr = yoloDetector.Init()
-	}()
-
-	if initErr != nil {
-		return initErr
-	}
-
-	ua.yoloDetector = yoloDetector
-	ua.yoloEnabled = true
-	log.Printf("YOLO v4 initialized successfully (CPU mode, threshold: %.2f)", yoloDetector.Threshold)
-	return nil
-}
-
-func (ua *UIAnalyzer) Close() {
-	ua.yoloMutex.Lock()
-	defer ua.yoloMutex.Unlock()
-
-	if ua.yoloDetector != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("YOLO cleanup panic recovered: %v", r)
-				}
-			}()
-			ua.yoloDetector.Close()
-		}()
-		ua.yoloDetector = nil
-		log.Println("YOLO resources cleaned up")
-	}
-}
-
 func (ua *UIAnalyzer) DetectUIElements(imagePath string) (*UIElements, error) {
+	ua.mu.RLock()
+	defer ua.mu.RUnlock()
+
 	if !ua.initialized {
 		return nil, fmt.Errorf("analyzer not initialized")
 	}
 
-	log.Printf("Starting UI element detection: %s", imagePath)
+	log.Printf("Starting OpenCV UI element detection: %s", imagePath)
 	startTime := time.Now()
 
 	elements := &UIElements{
-		YOLOObjects: []UIElement{},
+		YOLOObjects: []UIElement{}, // YOLO 완전 비활성화
 		CVButtons:   []UIElement{},
 		CVInputs:    []UIElement{},
 	}
 
-	// YOLO 감지 (완전히 격리된 실행)
-	if ua.yoloEnabled {
-		yoloObjects, err := ua.detectYOLOObjectsSafe(imagePath)
-		if err != nil {
-			log.Printf("YOLO detection failed: %v - disabling YOLO", err)
-			ua.yoloEnabled = false // 실패시 비활성화
-		} else {
-			elements.YOLOObjects = yoloObjects
-			log.Printf("YOLO detected %d objects", len(yoloObjects))
-		}
-	}
-
-	// OpenCV 감지 (병렬 실행)
+	// OpenCV 감지만 사용 (병렬 실행)
 	var wg sync.WaitGroup
-
 	wg.Add(2)
+
 	go func() {
 		defer wg.Done()
 		buttons, err := ua.detectCVButtons(imagePath)
@@ -212,6 +121,7 @@ func (ua *UIAnalyzer) DetectUIElements(imagePath string) (*UIElements, error) {
 			log.Printf("CV button detection failed: %v", err)
 		} else {
 			elements.CVButtons = buttons
+			log.Printf("CV detected %d buttons", len(buttons))
 		}
 	}()
 
@@ -222,185 +132,26 @@ func (ua *UIAnalyzer) DetectUIElements(imagePath string) (*UIElements, error) {
 			log.Printf("CV input detection failed: %v", err)
 		} else {
 			elements.CVInputs = inputs
+			log.Printf("CV detected %d input fields", len(inputs))
 		}
 	}()
 
 	wg.Wait()
 
+	// 추가 UI 요소 감지 (클릭 가능한 영역)
+	clickables, err := ua.detectClickableElements(imagePath)
+	if err != nil {
+		log.Printf("Clickable detection failed: %v", err)
+	} else {
+		// 클릭 가능한 요소들을 버튼으로 분류
+		elements.CVButtons = append(elements.CVButtons, clickables...)
+		log.Printf("CV detected %d additional clickable elements", len(clickables))
+	}
+
 	total := len(elements.YOLOObjects) + len(elements.CVButtons) + len(elements.CVInputs)
-	log.Printf("Detection completed in %v - total: %d elements", time.Since(startTime), total)
+	log.Printf("OpenCV detection completed in %v - total: %d elements", time.Since(startTime), total)
 
 	return elements, nil
-}
-
-func (ua *UIAnalyzer) detectYOLOObjectsSafe(imagePath string) ([]UIElement, error) {
-	// 크리티컬 섹션: YOLO는 절대 동시 실행 불가
-	ua.yoloMutex.Lock()
-	defer ua.yoloMutex.Unlock()
-
-	if !ua.yoloEnabled || ua.yoloDetector == nil {
-		return []UIElement{}, nil
-	}
-
-	// 메모리 정리
-	runtime.GC()
-
-	// 이미지 로드 및 검증
-	file, err := os.Open(imagePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open image: %v", err)
-	}
-	defer file.Close()
-
-	img, format, err := image.Decode(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode image: %v", err)
-	}
-
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
-	// 이미지 크기 제한 (메모리 보호)
-	if width <= 0 || height <= 0 || width > 2048 || height > 2048 {
-		return nil, fmt.Errorf("invalid image dimensions: %dx%d", width, height)
-	}
-
-	log.Printf("Processing image: %s (%dx%d)", format, width, height)
-
-	// Darknet 이미지 변환 (안전한 메모리 할당)
-	var darknetImg *darknet.DarknetImage
-	var conversionErr error
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				conversionErr = fmt.Errorf("image conversion panic: %v", r)
-			}
-		}()
-		darknetImg, conversionErr = darknet.Image2Float32(img)
-	}()
-
-	if conversionErr != nil {
-		return nil, conversionErr
-	}
-	if darknetImg == nil {
-		return nil, fmt.Errorf("darknet image conversion returned nil")
-	}
-
-	// 안전한 리소스 정리
-	defer func() {
-		if darknetImg != nil {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("Image cleanup panic recovered: %v", r)
-					}
-				}()
-				darknetImg.Close()
-			}()
-		}
-		runtime.GC() // 즉시 메모리 정리
-	}()
-
-	// YOLO 추론 실행 (패닉 보호)
-	var detections *darknet.DetectionResult
-	var detectErr error
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				detectErr = fmt.Errorf("YOLO detection panic: %v", r)
-				ua.yoloEnabled = false // 패닉 발생시 비활성화
-			}
-		}()
-
-		// 추가 메모리 정렬 보장
-		runtime.GC()
-		runtime.Gosched() // 스케줄러에게 제어권 양보
-
-		detections, detectErr = ua.yoloDetector.Detect(darknetImg)
-	}()
-
-	if detectErr != nil {
-		return nil, detectErr
-	}
-
-	if detections == nil || detections.Detections == nil {
-		return []UIElement{}, nil
-	}
-
-	// 결과 처리
-	var objects []UIElement
-	processedCount := 0
-
-	for _, detection := range detections.Detections {
-		if detection == nil {
-			continue
-		}
-
-		// 최고 확률 클래스 찾기
-		maxProb := float32(0)
-		bestClassIdx := 0
-
-		for i, prob := range detection.Probabilities {
-			if prob > maxProb {
-				maxProb = prob
-				bestClassIdx = i
-			}
-		}
-
-		// 낮은 확률 필터링
-		if maxProb < 0.3 {
-			continue
-		}
-
-		// 클래스명 결정
-		var className string
-		if bestClassIdx < len(detection.ClassNames) && detection.ClassNames[bestClassIdx] != "" {
-			className = detection.ClassNames[bestClassIdx]
-		} else {
-			className = "unknown"
-		}
-
-		// UI 타입 매핑
-		uiType, exists := ua.uiClassMapping[className]
-		if !exists {
-			uiType = "object"
-		}
-
-		// 바운딩 박스 검증
-		bbox := detection.BoundingBox
-		x1, y1 := bbox.StartPoint.X, bbox.StartPoint.Y
-		x2, y2 := bbox.EndPoint.X, bbox.EndPoint.Y
-
-		// 경계 검사 및 유효성 검증
-		if x1 < 0 || y1 < 0 || x2 > width || y2 > height || x1 >= x2 || y1 >= y2 {
-			continue
-		}
-
-		centerX, centerY := (x1+x2)/2, (y1+y2)/2
-		objWidth, objHeight := x2-x1, y2-y1
-
-		// 최소 크기 검증
-		if objWidth < 10 || objHeight < 10 {
-			continue
-		}
-
-		objects = append(objects, UIElement{
-			Type:       fmt.Sprintf("yolo_%s", uiType),
-			ClassName:  className,
-			Confidence: float64(maxProb),
-			BBox:       [4]int{x1, y1, x2, y2},
-			Center:     [2]int{centerX, centerY},
-			Width:      objWidth,
-			Height:     objHeight,
-		})
-
-		processedCount++
-	}
-
-	log.Printf("YOLO processed %d detections -> %d valid objects", len(detections.Detections), len(objects))
-	return objects, nil
 }
 
 func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
@@ -410,34 +161,81 @@ func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 	}
 	defer img.Close()
 
-	// 적응형 임계값 적용
+	var buttons []UIElement
+
+	// 방법 1: 적응형 임계값 + 윤곽선 검출
 	thresh := gocv.NewMat()
 	defer thresh.Close()
 	gocv.AdaptiveThreshold(img, &thresh, 255, gocv.AdaptiveThresholdGaussian, gocv.ThresholdBinaryInv, 11, 2)
 
-	// 윤곽선 검출
 	contours := gocv.FindContours(thresh, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
-	var buttons []UIElement
 	for i := 0; i < contours.Size(); i++ {
 		contour := contours.At(i)
 		area := gocv.ContourArea(contour)
 
-		// 크기 필터링
-		if area > 1000 && area < 50000 {
+		// 버튼 크기 필터링 (더 관대한 범위)
+		if area > 500 && area < 100000 {
 			rect := gocv.BoundingRect(contour)
 			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
 
-			// 종횡비 및 충실도 검사
-			if aspectRatio > 0.3 && aspectRatio < 8.0 {
+			// 버튼 특성 검사
+			if aspectRatio > 0.2 && aspectRatio < 15.0 && rect.Dx() > 30 && rect.Dy() > 15 {
 				rectArea := float64(rect.Dx() * rect.Dy())
-				if area/rectArea > 0.7 {
+				if area/rectArea > 0.5 { // 더 관대한 충실도
 					buttons = append(buttons, UIElement{
 						Type:       "cv_button",
-						Confidence: 0.8,
+						Confidence: 0.7,
 						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
 						Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
+			}
+		}
+	}
+
+	// 방법 2: 모폴로지 연산으로 추가 버튼 검출
+	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(3, 3))
+	defer kernel.Close()
+
+	closed := gocv.NewMat()
+	defer closed.Close()
+	gocv.MorphologyEx(thresh, &closed, gocv.MorphClose, kernel)
+
+	contours2 := gocv.FindContours(closed, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours2.Close()
+
+	for i := 0; i < contours2.Size(); i++ {
+		contour := contours2.At(i)
+		area := gocv.ContourArea(contour)
+
+		if area > 800 && area < 50000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			if aspectRatio > 0.3 && aspectRatio < 10.0 && rect.Dx() > 40 && rect.Dy() > 20 {
+				// 중복 검사
+				isDuplicate := false
+				newCenter := [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2}
+
+				for _, existing := range buttons {
+					dx := abs(existing.Center[0] - newCenter[0])
+					dy := abs(existing.Center[1] - newCenter[1])
+					if dx < 20 && dy < 20 { // 20픽셀 이내면 중복
+						isDuplicate = true
+						break
+					}
+				}
+
+				if !isDuplicate {
+					buttons = append(buttons, UIElement{
+						Type:       "cv_button_morph",
+						Confidence: 0.6,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     newCenter,
 						Width:      rect.Dx(),
 						Height:     rect.Dy(),
 					})
@@ -456,16 +254,17 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 	}
 	defer img.Close()
 
-	// 에지 검출
+	var inputs []UIElement
+
+	// 방법 1: 에지 검출 + 수평 구조 요소
 	edges := gocv.NewMat()
 	defer edges.Close()
 	gocv.Canny(img, &edges, 30, 100)
 
-	// 수평 구조 요소
-	horizontalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(40, 1))
+	// 수평 구조 요소 (입력 필드 감지용)
+	horizontalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(25, 1))
 	defer horizontalKernel.Close()
 
-	// 수평선 검출
 	detectHorizontal := gocv.NewMat()
 	defer detectHorizontal.Close()
 	gocv.MorphologyEx(edges, &detectHorizontal, gocv.MorphOpen, horizontalKernel)
@@ -473,20 +272,19 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 	contours := gocv.FindContours(detectHorizontal, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
-	var inputs []UIElement
 	for i := 0; i < contours.Size(); i++ {
 		contour := contours.At(i)
 		area := gocv.ContourArea(contour)
 
-		if area > 1000 && area < 30000 {
+		if area > 500 && area < 50000 {
 			rect := gocv.BoundingRect(contour)
 			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
 
-			// 입력 필드 특성 검사 (긴 직사각형)
-			if aspectRatio > 3.0 && rect.Dx() > 100 && rect.Dy() > 20 && rect.Dy() < 60 {
+			// 입력 필드 특성: 긴 직사각형
+			if aspectRatio > 2.0 && rect.Dx() > 80 && rect.Dy() > 15 && rect.Dy() < 80 {
 				inputs = append(inputs, UIElement{
 					Type:       "cv_input_field",
-					Confidence: 0.7,
+					Confidence: 0.8,
 					BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
 					Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
 					Width:      rect.Dx(),
@@ -496,7 +294,133 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 		}
 	}
 
+	// 방법 2: 텍스트 영역 검출 (입력 필드 후보)
+	textKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(15, 3))
+	defer textKernel.Close()
+
+	textAreas := gocv.NewMat()
+	defer textAreas.Close()
+	gocv.MorphologyEx(edges, &textAreas, gocv.MorphClose, textKernel)
+
+	contours2 := gocv.FindContours(textAreas, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours2.Close()
+
+	for i := 0; i < contours2.Size(); i++ {
+		contour := contours2.At(i)
+		area := gocv.ContourArea(contour)
+
+		if area > 1000 && area < 30000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			if aspectRatio > 3.0 && rect.Dx() > 100 && rect.Dy() > 20 && rect.Dy() < 60 {
+				// 중복 검사
+				isDuplicate := false
+				newCenter := [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2}
+
+				for _, existing := range inputs {
+					dx := abs(existing.Center[0] - newCenter[0])
+					dy := abs(existing.Center[1] - newCenter[1])
+					if dx < 30 && dy < 15 {
+						isDuplicate = true
+						break
+					}
+				}
+
+				if !isDuplicate {
+					inputs = append(inputs, UIElement{
+						Type:       "cv_input_text",
+						Confidence: 0.7,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     newCenter,
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
+			}
+		}
+	}
+
 	return inputs, nil
+}
+
+func (ua *UIAnalyzer) detectClickableElements(imagePath string) ([]UIElement, error) {
+	img := gocv.IMRead(imagePath, gocv.IMReadGrayScale)
+	if img.Empty() {
+		return nil, fmt.Errorf("failed to load image: %s", imagePath)
+	}
+	defer img.Close()
+
+	var clickables []UIElement
+
+	// 그래디언트 기반 검출 (버튼 경계 감지)
+	gradX := gocv.NewMat()
+	gradY := gocv.NewMat()
+	defer gradX.Close()
+	defer gradY.Close()
+
+	gocv.Sobel(img, &gradX, gocv.MatTypeCV16S, 1, 0, 3, 1, 0, gocv.BorderDefault)
+	gocv.Sobel(img, &gradY, gocv.MatTypeCV16S, 0, 1, 3, 1, 0, gocv.BorderDefault)
+
+	absGradX := gocv.NewMat()
+	absGradY := gocv.NewMat()
+	defer absGradX.Close()
+	defer absGradY.Close()
+
+	gocv.ConvertScaleAbs(gradX, &absGradX, 1, 0)
+	gocv.ConvertScaleAbs(gradY, &absGradY, 1, 0)
+
+	grad := gocv.NewMat()
+	defer grad.Close()
+	gocv.AddWeighted(absGradX, 0.5, absGradY, 0.5, 0, &grad)
+
+	// 임계값 적용
+	thresh := gocv.NewMat()
+	defer thresh.Close()
+	gocv.Threshold(grad, &thresh, 50, 255, gocv.ThresholdBinary)
+
+	// 모폴로지 연산
+	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(5, 5))
+	defer kernel.Close()
+
+	cleaned := gocv.NewMat()
+	defer cleaned.Close()
+	gocv.MorphologyEx(thresh, &cleaned, gocv.MorphClose, kernel)
+
+	contours := gocv.FindContours(cleaned, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours.Close()
+
+	for i := 0; i < contours.Size(); i++ {
+		contour := contours.At(i)
+		area := gocv.ContourArea(contour)
+
+		// 클릭 가능한 요소 크기
+		if area > 1000 && area < 80000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			// 적절한 종횡비의 사각형 영역
+			if aspectRatio > 0.2 && aspectRatio < 8.0 && rect.Dx() > 25 && rect.Dy() > 25 {
+				clickables = append(clickables, UIElement{
+					Type:       "cv_clickable",
+					Confidence: 0.5,
+					BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+					Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
+					Width:      rect.Dx(),
+					Height:     rect.Dy(),
+				})
+			}
+		}
+	}
+
+	return clickables, nil
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements) (string, map[int]UIElement, error) {
@@ -519,23 +443,23 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 	elementID := 1
 
 	colors := map[string]color.RGBA{
-		"yolo":      {255, 0, 0, 255},
-		"cv_button": {0, 255, 0, 255},
-		"cv_input":  {255, 165, 0, 255},
+		"cv_button":    {0, 255, 0, 255},   // 녹색
+		"cv_input":     {255, 165, 0, 255}, // 주황색
+		"cv_clickable": {0, 191, 255, 255}, // 하늘색
 	}
 
-	// 모든 요소 그리기
-	allElements := append(append(elements.YOLOObjects, elements.CVButtons...), elements.CVInputs...)
+	// 모든 요소 그리기 (YOLO 제외)
+	allElements := append(elements.CVButtons, elements.CVInputs...)
 	for _, element := range allElements {
 		idToElement[elementID] = element
 
 		var elementColor color.RGBA
-		if strings.HasPrefix(element.Type, "yolo") {
-			elementColor = colors["yolo"]
-		} else if strings.HasPrefix(element.Type, "cv_button") {
+		if strings.Contains(element.Type, "button") {
 			elementColor = colors["cv_button"]
-		} else {
+		} else if strings.Contains(element.Type, "input") {
 			elementColor = colors["cv_input"]
+		} else {
+			elementColor = colors["cv_clickable"]
 		}
 
 		ua.drawRectangle(labeledImg, element.BBox, elementColor)
@@ -543,7 +467,6 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 		elementID++
 	}
 
-	// 임시 파일 저장
 	tempFile, err := os.CreateTemp("", "labeled_ui_*.png")
 	if err != nil {
 		return "", nil, err
@@ -560,26 +483,29 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RGBA) {
 	bounds := img.Bounds()
 
-	// 수평선 그리기
-	for x := bbox[0]; x <= bbox[2]; x++ {
-		if x >= bounds.Min.X && x < bounds.Max.X {
-			if bbox[1] >= bounds.Min.Y && bbox[1] < bounds.Max.Y {
-				img.Set(x, bbox[1], color)
-			}
-			if bbox[3] >= bounds.Min.Y && bbox[3] < bounds.Max.Y {
-				img.Set(x, bbox[3], color)
+	// 두께 2픽셀의 사각형 그리기
+	for thickness := 0; thickness < 2; thickness++ {
+		// 수평선
+		for x := bbox[0]; x <= bbox[2]; x++ {
+			if x >= bounds.Min.X && x < bounds.Max.X {
+				if bbox[1]+thickness >= bounds.Min.Y && bbox[1]+thickness < bounds.Max.Y {
+					img.Set(x, bbox[1]+thickness, color)
+				}
+				if bbox[3]-thickness >= bounds.Min.Y && bbox[3]-thickness < bounds.Max.Y {
+					img.Set(x, bbox[3]-thickness, color)
+				}
 			}
 		}
-	}
 
-	// 수직선 그리기
-	for y := bbox[1]; y <= bbox[3]; y++ {
-		if y >= bounds.Min.Y && y < bounds.Max.Y {
-			if bbox[0] >= bounds.Min.X && bbox[0] < bounds.Max.X {
-				img.Set(bbox[0], y, color)
-			}
-			if bbox[2] >= bounds.Min.X && bbox[2] < bounds.Max.X {
-				img.Set(bbox[2], y, color)
+		// 수직선
+		for y := bbox[1]; y <= bbox[3]; y++ {
+			if y >= bounds.Min.Y && y < bounds.Max.Y {
+				if bbox[0]+thickness >= bounds.Min.X && bbox[0]+thickness < bounds.Max.X {
+					img.Set(bbox[0]+thickness, y, color)
+				}
+				if bbox[2]-thickness >= bounds.Min.X && bbox[2]-thickness < bounds.Max.X {
+					img.Set(bbox[2]-thickness, y, color)
+				}
 			}
 		}
 	}
@@ -587,9 +513,17 @@ func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RG
 
 func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, color color.RGBA) {
 	bounds := img.Bounds()
-	if center[0] >= bounds.Min.X && center[0] < bounds.Max.X &&
-		center[1] >= bounds.Min.Y && center[1] < bounds.Max.Y {
-		img.Set(center[0], center[1], color)
+
+	// 중심에 작은 원 그리기 (텍스트 대신)
+	for dx := -2; dx <= 2; dx++ {
+		for dy := -2; dy <= 2; dy++ {
+			x, y := center[0]+dx, center[1]+dy
+			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+				if dx*dx+dy*dy <= 4 { // 원 모양
+					img.Set(x, y, color)
+				}
+			}
+		}
 	}
 }
 
@@ -612,19 +546,26 @@ func (ua *UIAnalyzer) SelectElementWithAI(labeledImagePath, userGoal string, idT
 		if text == "" {
 			text = element.Type
 		}
-		elementInfo = append(elementInfo, fmt.Sprintf("ID%d: %s confidence=%.2f position=%v",
-			elementID, text, element.Confidence, element.Center))
+		elementInfo = append(elementInfo, fmt.Sprintf("ID%d: %s confidence=%.2f position=%v size=%dx%d",
+			elementID, text, element.Confidence, element.Center, element.Width, element.Height))
 	}
 
-	prompt := fmt.Sprintf(`Analyze this UI and select the best element for: "%s"
+	prompt := fmt.Sprintf(`Analyze this UI screenshot and select the best element for the user's goal: "%s"
 
-Elements:
+Available UI Elements (detected by OpenCV):
 %s
 
-Respond in JSON:
+Instructions:
+- Choose the element ID that best matches the user's goal
+- Consider element type, position, and size
+- Buttons are good for clicking actions
+- Input fields are good for text entry
+- Respond in JSON format only
+
+Example response:
 {
-    "selected_id": 1,
-    "reasoning": "explanation"
+    "selected_id": 3,
+    "reasoning": "Selected the login button at position (320, 150) as it matches the user's goal to log in"
 }`, userGoal, strings.Join(elementInfo, "\n"))
 
 	resp, err := ua.openaiClient.CreateChatCompletion(
@@ -645,7 +586,8 @@ Respond in JSON:
 					},
 				},
 			},
-			MaxTokens: 500,
+			MaxTokens:   500,
+			Temperature: 0.1,
 		},
 	)
 
@@ -712,7 +654,7 @@ func (ua *UIAnalyzer) GetCoordinatesFromID(selectedID int, idToElement map[int]U
 
 var analyzer *UIAnalyzer
 
-// 핸들러 함수들 (동일)
+// 핸들러 함수들
 func analyzeHandler(c *gin.Context) {
 	requestStart := time.Now()
 	requestID := uuid.New().String()[:8]
@@ -755,7 +697,7 @@ func analyzeHandler(c *gin.Context) {
 	totalElements := len(elements.YOLOObjects) + len(elements.CVButtons) + len(elements.CVInputs)
 	if totalElements == 0 {
 		c.JSON(http.StatusOK, ActionResponse{
-			Success: false, Reasoning: "No UI elements detected",
+			Success: false, Reasoning: "No UI elements detected in the image",
 		})
 		return
 	}
@@ -772,7 +714,7 @@ func analyzeHandler(c *gin.Context) {
 	selection, err := analyzer.SelectElementWithAI(labeledImagePath, userGoal, idToElement)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ActionResponse{
-			Success: false, ErrorMessage: "AI selection failed",
+			Success: false, ErrorMessage: "AI selection failed: " + err.Error(),
 		})
 		return
 	}
@@ -820,7 +762,7 @@ func visualizeHandler(c *gin.Context) {
 
 	elements, err := analyzer.DetectUIElements(imagePath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Detection failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Detection failed: " + err.Error()})
 		return
 	}
 
@@ -845,6 +787,11 @@ func visualizeHandler(c *gin.Context) {
 		"elements":       elements,
 		"element_map":    idToElement,
 		"total_elements": totalElements,
+		"detection_info": gin.H{
+			"yolo_enabled": false,
+			"opencv_only":  true,
+			"stable_mode":  true,
+		},
 	})
 }
 
@@ -852,32 +799,38 @@ func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":           "healthy",
 		"timestamp":        time.Now().Unix(),
-		"yolo_enabled":     analyzer != nil && analyzer.yoloEnabled,
+		"yolo_enabled":     false,
+		"opencv_enabled":   true,
 		"openai_available": analyzer != nil && analyzer.openaiClient != nil,
+		"stable_mode":      true,
 	})
 }
 
 func rootHandler(c *gin.Context) {
-	capabilities := []string{"OpenCV image processing", "OpenAI element selection"}
-	if analyzer != nil && analyzer.yoloEnabled {
-		capabilities = append([]string{"YOLO object detection"}, capabilities...)
+	capabilities := []string{
+		"Advanced OpenCV button detection",
+		"OpenCV input field detection",
+		"Clickable element detection",
+		"OpenAI element selection",
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"service":      "UI Automation Server",
-		"version":      "2.0.0",
+		"service":      "Stable UI Automation Server",
+		"version":      "3.0.0-stable",
 		"status":       "operational",
 		"capabilities": capabilities,
-		"yolo_enabled": analyzer != nil && analyzer.yoloEnabled,
-		"thread_safe":  true,
+		"yolo_enabled": false,
+		"opencv_only":  true,
+		"stable_mode":  true,
+		"description":  "YOLO disabled for maximum stability. Using advanced OpenCV detection only.",
 	})
 }
 
 func main() {
-	log.Println("Starting thread-safe UI automation server...")
+	log.Println("Starting stable UI automation server (OpenCV-only mode)...")
 
-	// 메모리 및 성능 최적화
-	debug.SetGCPercent(20)
+	// 메모리 최적화
+	debug.SetGCPercent(50)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	var err error
@@ -885,7 +838,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Initialization failed: %v", err)
 	}
-	defer analyzer.Close()
 
 	// Gin 설정
 	gin.SetMode(gin.ReleaseMode)
@@ -911,7 +863,10 @@ func main() {
 		port = "8000"
 	}
 
-	log.Printf("Server ready on port %s", port)
+	log.Printf("🚀 Stable server ready on port %s", port)
+	log.Println("✅ YOLO disabled - no more segmentation faults!")
+	log.Println("🔧 Using advanced OpenCV detection algorithms")
+
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
