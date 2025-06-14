@@ -2,18 +2,13 @@ FROM alpine:3.19 AS yolo-models
 RUN apk add --no-cache wget curl
 WORKDIR /models
 RUN set -e && \
-    wget -q --timeout=120 --tries=3 \
+    wget -q --timeout=300 --tries=5 \
     https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4.cfg && \
-    wget -q --timeout=120 --tries=3 \
+    wget -q --timeout=300 --tries=5 \
     https://raw.githubusercontent.com/AlexeyAB/darknet/master/data/coco.names && \
-    ( wget -q --timeout=300 --tries=2 \
-      -O yolov4.weights \
-      "https://sourceforge.net/projects/darknet-yolo.mirror/files/darknet_yolo_v4_pre/yolov4.weights/download" || \
-      wget -q --timeout=300 --tries=2 \
-      https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v3_optimal/yolov4.weights || \
-      curl -L --max-time 300 --retry 2 --retry-delay 10 \
-      -o yolov4.weights \
-      "https://sourceforge.net/projects/darknet-yolo.mirror/files/darknet_yolo_v4_pre/yolov4.weights/download" ) && \
+    curl -L --max-time 900 --retry 5 --retry-delay 30 \
+    -o yolov4.weights \
+    https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v3_optimal/yolov4.weights && \
     FILESIZE=$(stat -c%s yolov4.weights) && \
     [ ${FILESIZE} -gt 240000000 ] && [ ${FILESIZE} -lt 260000000 ]
 
@@ -37,13 +32,17 @@ WORKDIR /app
 COPY --from=darknet-builder /darknet/libdarknet.so /usr/local/lib/
 COPY --from=darknet-builder /darknet/include/ /usr/local/include/darknet/
 COPY --from=darknet-builder /darknet/src/ /usr/local/include/darknet/src/
-RUN mkdir -p /usr/local/lib/pkgconfig && \
-    echo "prefix=/usr/local\nexec_prefix=\${prefix}\nlibdir=\${exec_prefix}/lib\nincludedir=\${prefix}/include\n\nName: darknet\nDescription: Darknet Neural Network Framework\nVersion: 1.0\nLibs: -L\${libdir} -ldarknet\nCflags: -I\${includedir}" > /usr/local/lib/pkgconfig/darknet.pc && \
+RUN ln -sf /usr/local/include/darknet/darknet.h /usr/local/include/darknet.h && \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    echo "prefix=/usr/local\nexec_prefix=\${prefix}\nlibdir=\${exec_prefix}/lib\nincludedir=\${prefix}/include\n\nName: darknet\nDescription: Darknet Neural Network Framework\nVersion: 1.0\nLibs: -L\${libdir} -ldarknet\nCflags: -I\${includedir} -I\${includedir}/darknet" > /usr/local/lib/pkgconfig/darknet.pc && \
     ldconfig
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ENV CGO_ENABLED=1 GOOS=linux PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+ENV CGO_ENABLED=1 GOOS=linux 
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+ENV CGO_CFLAGS="-I/usr/local/include -I/usr/local/include/darknet"
+ENV CGO_LDFLAGS="-L/usr/local/lib -ldarknet"
 RUN go build -ldflags="-s -w" -tags netgo -o ui-automation .
 
 FROM debian:bullseye-slim
