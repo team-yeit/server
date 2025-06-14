@@ -10,8 +10,7 @@ RUN set -e && \
     -o yolov4.weights \
     https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v3_optimal/yolov4.weights && \
     FILESIZE=$(stat -c%s yolov4.weights) && \
-    [ ${FILESIZE} -gt 240000000 ] && [ ${FILESIZE} -lt 260000000 ] && \
-    echo "names = data/coco.names" >> yolov4.cfg
+    [ ${FILESIZE} -gt 240000000 ] && [ ${FILESIZE} -lt 260000000 ]
 
 FROM gocv/opencv:4.11.0 AS darknet-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
