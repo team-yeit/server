@@ -86,9 +86,9 @@ RUN go build \
     -o ui-automation \
     main.go
 
-# ==================== Runtime Stage ====================
+# ==================== Runtime Stage (최종 단계) ====================
 
-FROM ubuntu:22.04 AS runtime
+FROM ubuntu:22.04
 
 # 필수 런타임 라이브러리 설치
 RUN apt-get update && apt-get install -y \
@@ -153,66 +153,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 # 실행 명령어
 CMD ["./ui-automation"]
-
-# ==================== 개발용 단계 (선택사항) ====================
-
-# 개발용 이미지 (docker build --target development)
-FROM builder AS development
-
-WORKDIR /app
-
-# 개발 도구 설치
-RUN apt-get update && apt-get install -y \
-    vim \
-    tree \
-    htop \
-    && rm -rf /var/lib/apt/lists/*
-
-# Go 개발 도구
-RUN go install github.com/air-verse/air@latest
-RUN go install github.com/go-delve/delve/cmd/dlv@latest
-
-# 소스코드 복사 (개발용)
-COPY . .
-
-# air 설정 파일
-COPY .air.toml .
-
-# 개발 모드 실행 (hot reload)
-CMD ["air"]
-
-# ==================== 빌드 설명서 ====================
-
-# 빌드 명령어들:
-#
-# 1. 프로덕션 빌드:
-#    docker build -t ui-automation:latest .
-#
-# 2. 개발 빌드:
-#    docker build --target development -t ui-automation:dev .
-#
-# 3. 실행:
-#    docker run -p 8000:8000 -e OPENAI_API_KEY=your_key ui-automation:latest
-#
-# 4. 개발 모드 실행:
-#    docker run -p 8000:8000 -v $(pwd):/app -e OPENAI_API_KEY=your_key ui-automation:dev
-#
-# 5. 도커 컴포즈 (docker-compose.yml 참고):
-#    docker-compose up --build
-
-# ==================== 최적화 팁 ====================
-
-# 이미지 크기 최적화:
-# - 멀티스테이지 빌드로 빌드 도구들 제거
-# - 정적 링킹으로 라이브러리 의존성 최소화
-# - 불필요한 패키지 정리
-#
-# 보안 강화:
-# - 비 root 사용자로 실행
-# - 최소한의 권한만 부여
-# - 정기적인 베이스 이미지 업데이트
-#
-# 성능 최적화:
-# - OpenCV 정적 링킹
-# - YOLO 모델 로컬 캐싱
-# - 멀티코어 빌드 활용
