@@ -1,6 +1,6 @@
 module server
 
-go 1.21.3
+go 1.23.6
 
 require (
 	github.com/LdDl/go-darknet v1.3.7

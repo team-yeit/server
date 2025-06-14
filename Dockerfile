@@ -92,7 +92,7 @@ RUN echo "⚙️  Makefile 설정 중..." && \
     ls -la libdarknet.so || echo "libdarknet.so 생성 확인 필요"
 
 # Go 빌드 단계
-FROM gocv/opencv:4.8.1 AS go-builder
+FROM gocv/opencv:4.11.0 AS go-builder
 
 # 작업 디렉토리 설정
 WORKDIR /app
