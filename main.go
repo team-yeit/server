@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,24 +83,44 @@ type UIAnalyzer struct {
 	yoloDetector   *darknet.YOLONetwork
 	openaiClient   *openai.Client
 	uiClassMapping map[string]string
-	mu             sync.RWMutex
+	mu             sync.Mutex // RWMutex에서 Mutex로 변경
+	yoloEnabled    bool       // YOLO 활성화 상태
 }
 
 func NewUIAnalyzer() (*UIAnalyzer, error) {
 	log.Println("Initializing intelligent UI automation system with YOLO object detection and OpenAI integration...")
 	startTime := time.Now()
 
-	yoloDetector := &darknet.YOLONetwork{
-		GPUDeviceIndex:           0,
-		NetworkConfigurationFile: "cfg/yolov4.cfg",
-		WeightsFile:              "yolov4.weights",
-		Threshold:                0.25,
-	}
+	// 메모리 관리 개선
+	debug.SetGCPercent(50)
+	runtime.GC()
 
-	if err := yoloDetector.Init(); err != nil {
-		return nil, fmt.Errorf("YOLO network initialization failed - check model files and configuration: %v", err)
+	var yoloDetector *darknet.YOLONetwork
+	yoloEnabled := false
+
+	// YOLO 초기화 시도 (실패해도 계속 진행)
+	if _, err := os.Stat("cfg/yolov4.cfg"); err == nil {
+		if _, err := os.Stat("yolov4.weights"); err == nil {
+			yoloDetector = &darknet.YOLONetwork{
+				GPUDeviceIndex:           0,
+				NetworkConfigurationFile: "cfg/yolov4.cfg",
+				WeightsFile:              "yolov4.weights",
+				Threshold:                0.25,
+			}
+
+			if err := yoloDetector.Init(); err != nil {
+				log.Printf("WARNING: YOLO initialization failed - continuing without YOLO: %v", err)
+				yoloDetector = nil
+			} else {
+				yoloEnabled = true
+				log.Printf("YOLO v4 neural network successfully initialized with confidence threshold %.2f", yoloDetector.Threshold)
+			}
+		} else {
+			log.Println("WARNING: yolov4.weights not found - YOLO detection disabled")
+		}
+	} else {
+		log.Println("WARNING: cfg/yolov4.cfg not found - YOLO detection disabled")
 	}
-	log.Printf("YOLO v4 neural network successfully initialized with confidence threshold %.2f", yoloDetector.Threshold)
 
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
@@ -114,45 +136,60 @@ func NewUIAnalyzer() (*UIAnalyzer, error) {
 	}
 
 	initDuration := time.Since(startTime)
-	log.Printf("UI analysis system fully initialized in %v with YOLO detection, OpenCV processing, and AI selection capabilities", initDuration)
+	log.Printf("UI analysis system fully initialized in %v with YOLO detection: %t, OpenCV processing, and AI selection capabilities", initDuration, yoloEnabled)
 
 	return &UIAnalyzer{
-		yoloDetector: yoloDetector, openaiClient: openaiClient, uiClassMapping: uiClassMapping,
+		yoloDetector:   yoloDetector,
+		openaiClient:   openaiClient,
+		uiClassMapping: uiClassMapping,
+		yoloEnabled:    yoloEnabled,
 	}, nil
 }
 
 func (ua *UIAnalyzer) Close() {
+	ua.mu.Lock()
+	defer ua.mu.Unlock()
+
 	if ua.yoloDetector != nil {
 		ua.yoloDetector.Close()
+		ua.yoloDetector = nil
 		log.Println("YOLO detector resources cleaned up and released")
 	}
 }
 
 func (ua *UIAnalyzer) DetectUIElements(imagePath string) (*UIElements, error) {
-	ua.mu.RLock()
-	defer ua.mu.RUnlock()
+	ua.mu.Lock()
+	defer ua.mu.Unlock()
 
 	log.Printf("Starting comprehensive UI element detection on image: %s", imagePath)
 	startTime := time.Now()
 
 	elements := &UIElements{YOLOObjects: []UIElement{}, CVButtons: []UIElement{}, CVInputs: []UIElement{}}
-	var wg sync.WaitGroup
-	var yoloErr, cvButtonErr, cvInputErr error
 
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
+	// YOLO 감지를 먼저 순차적으로 실행 (동시성 문제 방지)
+	var yoloObjects []UIElement
+	var yoloErr error
+
+	if ua.yoloEnabled && ua.yoloDetector != nil {
 		log.Println("Executing YOLO object detection for UI elements recognition...")
-		yoloObjects, err := ua.detectYOLOObjects(imagePath)
-		if err != nil {
-			yoloErr = err
-			log.Printf("YOLO detection failed with error: %v", err)
-			return
+		yoloObjects, yoloErr = ua.detectYOLOObjects(imagePath)
+		if yoloErr != nil {
+			log.Printf("YOLO detection failed with error: %v - continuing with OpenCV only", yoloErr)
+			// YOLO 실패시 비활성화
+			ua.yoloEnabled = false
+		} else {
+			elements.YOLOObjects = yoloObjects
+			log.Printf("YOLO detection completed successfully - found %d potential UI objects", len(yoloObjects))
 		}
-		elements.YOLOObjects = yoloObjects
-		log.Printf("YOLO detection completed successfully - found %d potential UI objects", len(yoloObjects))
-	}()
+	} else {
+		log.Println("YOLO detection skipped - not enabled or not available")
+	}
 
+	// OpenCV 감지들을 병렬로 실행
+	var wg sync.WaitGroup
+	var cvButtonErr, cvInputErr error
+
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		log.Println("Executing OpenCV button detection using contour analysis and morphological operations...")
@@ -194,6 +231,13 @@ func (ua *UIAnalyzer) DetectUIElements(imagePath string) (*UIElements, error) {
 }
 
 func (ua *UIAnalyzer) detectYOLOObjects(imagePath string) ([]UIElement, error) {
+	if !ua.yoloEnabled || ua.yoloDetector == nil {
+		return []UIElement{}, nil
+	}
+
+	// 메모리 정리
+	defer runtime.GC()
+
 	file, err := os.Open(imagePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open image file for YOLO processing: %v", err)
@@ -204,17 +248,45 @@ func (ua *UIAnalyzer) detectYOLOObjects(imagePath string) ([]UIElement, error) {
 	if err != nil {
 		return nil, fmt.Errorf("image decoding failed - unsupported format or corrupted file: %v", err)
 	}
-	log.Printf("Image successfully decoded - format: %s, dimensions: %dx%d", format, img.Bounds().Dx(), img.Bounds().Dy())
+
+	// 이미지 유효성 검사
+	bounds := img.Bounds()
+	if bounds.Dx() == 0 || bounds.Dy() == 0 || bounds.Dx() > 4096 || bounds.Dy() > 4096 {
+		return nil, fmt.Errorf("invalid image dimensions: %dx%d", bounds.Dx(), bounds.Dy())
+	}
+
+	log.Printf("Image successfully decoded - format: %s, dimensions: %dx%d", format, bounds.Dx(), bounds.Dy())
 
 	darknetImg, err := darknet.Image2Float32(img)
 	if err != nil {
 		return nil, fmt.Errorf("darknet image conversion failed - memory allocation or format issue: %v", err)
 	}
-	defer darknetImg.Close()
+	defer func() {
+		if darknetImg != nil {
+			darknetImg.Close()
+		}
+	}()
 
-	detections, err := ua.yoloDetector.Detect(darknetImg)
+	// YOLO 감지 실행 (복구 가능한 패닉 처리)
+	var detections *darknet.Detection
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("YOLO detection panic recovered: %v", r)
+				ua.yoloEnabled = false // 패닉 발생시 YOLO 비활성화
+				err = fmt.Errorf("YOLO detection panic: %v", r)
+			}
+		}()
+
+		detections, err = ua.yoloDetector.Detect(darknetImg)
+	}()
+
 	if err != nil {
 		return nil, fmt.Errorf("YOLO neural network inference failed: %v", err)
+	}
+
+	if detections == nil {
+		return []UIElement{}, nil
 	}
 
 	var objects []UIElement
@@ -251,6 +323,12 @@ func (ua *UIAnalyzer) detectYOLOObjects(imagePath string) ([]UIElement, error) {
 
 		x1, y1 := detection.BoundingBox.StartPoint.X, detection.BoundingBox.StartPoint.Y
 		x2, y2 := detection.BoundingBox.EndPoint.X, detection.BoundingBox.EndPoint.Y
+
+		// 경계 검사
+		if x1 < 0 || y1 < 0 || x2 > bounds.Dx() || y2 > bounds.Dy() || x1 >= x2 || y1 >= y2 {
+			continue
+		}
+
 		centerX, centerY := (x1+x2)/2, (y1+y2)/2
 		width, height := x2-x1, y2-y1
 
@@ -305,7 +383,6 @@ func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 				}
 			}
 		}
-		// Note: Individual contour.Close() removed to prevent double-free memory issues
 	}
 
 	log.Printf("Button detection analysis - total contours: %d, aspect ratio filtered: %d, final buttons: %d",
@@ -357,7 +434,6 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 				validInputs++
 			}
 		}
-		// Note: Individual contour.Close() removed to prevent double-free memory issues
 	}
 
 	log.Printf("Input field detection analysis - total contours: %d, dimension filtered: %d, final input fields: %d",
@@ -431,22 +507,23 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 }
 
 func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RGBA) {
+	bounds := img.Bounds()
 	for x := bbox[0]; x <= bbox[2]; x++ {
-		if x >= 0 && x < img.Bounds().Dx() {
-			if bbox[1] >= 0 && bbox[1] < img.Bounds().Dy() {
+		if x >= bounds.Min.X && x < bounds.Max.X {
+			if bbox[1] >= bounds.Min.Y && bbox[1] < bounds.Max.Y {
 				img.Set(x, bbox[1], color)
 			}
-			if bbox[3] >= 0 && bbox[3] < img.Bounds().Dy() {
+			if bbox[3] >= bounds.Min.Y && bbox[3] < bounds.Max.Y {
 				img.Set(x, bbox[3], color)
 			}
 		}
 	}
 	for y := bbox[1]; y <= bbox[3]; y++ {
-		if y >= 0 && y < img.Bounds().Dy() {
-			if bbox[0] >= 0 && bbox[0] < img.Bounds().Dx() {
+		if y >= bounds.Min.Y && y < bounds.Max.Y {
+			if bbox[0] >= bounds.Min.X && bbox[0] < bounds.Max.X {
 				img.Set(bbox[0], y, color)
 			}
-			if bbox[2] >= 0 && bbox[2] < img.Bounds().Dx() {
+			if bbox[2] >= bounds.Min.X && bbox[2] < bounds.Max.X {
 				img.Set(bbox[2], y, color)
 			}
 		}
@@ -454,7 +531,9 @@ func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RG
 }
 
 func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, color color.RGBA) {
-	if center[0] >= 0 && center[0] < img.Bounds().Dx() && center[1] >= 0 && center[1] < img.Bounds().Dy() {
+	bounds := img.Bounds()
+	if center[0] >= bounds.Min.X && center[0] < bounds.Max.X &&
+		center[1] >= bounds.Min.Y && center[1] < bounds.Max.Y {
 		img.Set(center[0], center[1], color)
 	}
 }
@@ -770,18 +849,24 @@ func visualizeHandler(c *gin.Context) {
 func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": "healthy", "timestamp": time.Now().Unix(),
-		"yolo_initialized":  analyzer != nil && analyzer.yoloDetector != nil,
+		"yolo_initialized":  analyzer != nil && analyzer.yoloEnabled,
 		"openai_configured": analyzer != nil && analyzer.openaiClient != nil,
 	})
 }
 
 func rootHandler(c *gin.Context) {
+	capabilities := []string{"OpenCV image processing", "OpenAI element selection"}
+	if analyzer != nil && analyzer.yoloEnabled {
+		capabilities = append([]string{"YOLO object detection"}, capabilities...)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"service":          "Intelligent UI Automation Server",
-		"version":          "1.0.0",
+		"version":          "1.0.1",
 		"status":           "operational",
-		"capabilities":     []string{"YOLO object detection", "OpenCV image processing", "OpenAI element selection"},
-		"openai_available": analyzer.openaiClient != nil,
+		"capabilities":     capabilities,
+		"yolo_enabled":     analyzer != nil && analyzer.yoloEnabled,
+		"openai_available": analyzer != nil && analyzer.openaiClient != nil,
 	})
 }
 
