@@ -1,7 +1,7 @@
 # Multi-stage build for UI automation with YOLO detection
 
 # Stage 1: YOLO 모델 다운로드 (Alpine 경량 이미지 사용)
-FROM alpine:3.19 as yolo-models
+FROM alpine:3.19 AS yolo-models
 RUN apk add --no-cache wget curl
 
 WORKDIR /models
@@ -41,7 +41,7 @@ RUN set -e && \
     (echo "❌ yolov4.weights size check failed" && exit 1)
 
 # Stage 2: Darknet 빌드
-FROM debian:bullseye-slim as darknet-builder
+FROM debian:bullseye-slim AS darknet-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
@@ -58,7 +58,7 @@ RUN git clone https://github.com/AlexeyAB/darknet.git . && \
     make
 
 # Stage 3: Go 빌드 환경
-FROM gocv/opencv:4.8.1 as go-builder
+FROM gocv/opencv:4.8.1 AS go-builder
 WORKDIR /app
 
 # Go 모듈 파일들 복사 및 의존성 다운로드
@@ -109,11 +109,8 @@ COPY --from=yolo-models /models/yolov4.cfg /app/models/
 COPY --from=yolo-models /models/coco.names /app/models/
 COPY --from=yolo-models /models/yolov4.weights /app/models/
 
-# 설정 파일들 복사 (있다면)
-COPY configs/ /app/configs/ 2>/dev/null || true
-
 # 로그 디렉토리 생성
-RUN mkdir -p /app/logs
+RUN mkdir -p /app/logs /app/configs
 
 # 포트 노출 (필요에 따라 수정)
 EXPOSE 8080
