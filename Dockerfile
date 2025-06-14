@@ -1,7 +1,11 @@
+# YOLO 모델 다운로드 단계
 FROM alpine:3.19 AS yolo-models
 RUN apk add --no-cache wget curl
 WORKDIR /models
+
+# YOLO 모델 파일들 다운로드 (OpenCV DNN에서 사용)
 RUN set -e && \
+    echo "Downloading YOLO model files..." && \
     wget -q --timeout=300 --tries=5 \
     https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4.cfg && \
     wget -q --timeout=300 --tries=5 \
@@ -9,84 +13,72 @@ RUN set -e && \
     curl -L --max-time 900 --retry 5 --retry-delay 30 \
     -o yolov4.weights \
     https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v3_optimal/yolov4.weights && \
+    # 파일 크기 검증 (약 245MB)
     FILESIZE=$(stat -c%s yolov4.weights) && \
     [ ${FILESIZE} -gt 240000000 ] && [ ${FILESIZE} -lt 260000000 ] && \
-    echo "names = data/coco.names" >> yolov4.cfg
+    echo "YOLO model files downloaded successfully"
 
-FROM gocv/opencv:4.11.0 AS darknet-builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential pkg-config make ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-RUN ( git clone https://github.com/AlexeyAB/darknet.git /darknet || \
-      git -c http.sslVerify=false clone https://github.com/AlexeyAB/darknet.git /darknet || \
-      git clone http://github.com/AlexeyAB/darknet.git /darknet || \
-      git clone --depth 1 https://github.com/pjreddie/darknet.git /darknet )
-WORKDIR /darknet
-RUN sed -i 's/GPU=1/GPU=0/' Makefile && \
-    sed -i 's/CUDNN=1/CUDNN=0/' Makefile && \
-    sed -i 's/OPENCV=0/OPENCV=1/' Makefile && \
-    sed -i 's/LIBSO=0/LIBSO=1/' Makefile && \
-    make clean && make -j$(nproc)
-
+# Go 애플리케이션 빌드 단계
 FROM gocv/opencv:4.11.0 AS go-builder
 WORKDIR /app
-COPY --from=darknet-builder /darknet/libdarknet.so /usr/local/lib/
-COPY --from=darknet-builder /darknet/include/ /usr/local/include/darknet/
-COPY --from=darknet-builder /darknet/src/ /usr/local/include/darknet/src/
-RUN ln -sf /usr/local/include/darknet/darknet.h /usr/local/include/darknet.h && \
-    mkdir -p /usr/local/lib/pkgconfig && \
-    echo "prefix=/usr/local\nexec_prefix=\${prefix}\nlibdir=\${exec_prefix}/lib\nincludedir=\${prefix}/include\n\nName: darknet\nDescription: Darknet Neural Network Framework\nVersion: 1.0\nLibs: -L\${libdir} -ldarknet\nCflags: -I\${includedir} -I\${includedir}/darknet" > /usr/local/lib/pkgconfig/darknet.pc && \
-    ldconfig
+
+# Go 모듈 의존성 설치
 COPY go.mod go.sum ./
 RUN go mod download
+
+# 소스 코드 복사 및 빌드
 COPY . .
-ENV CGO_ENABLED=1 GOOS=linux 
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-ENV CGO_CFLAGS="-I/usr/local/include -I/usr/local/include/darknet"
-ENV CGO_LDFLAGS="-L/usr/local/lib -ldarknet"
+ENV CGO_ENABLED=1 
+ENV GOOS=linux
 RUN go build -ldflags="-s -w" -tags netgo -o ui-automation .
 
+# 최종 실행 단계
 FROM gocv/opencv:4.11.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
+    ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/* && apt-get clean
+
 WORKDIR /app
+
+# 빌드된 애플리케이션 복사
 COPY --from=go-builder /app/ui-automation .
-COPY --from=go-builder /usr/local/lib/libdarknet.so /usr/local/lib/
-RUN mkdir -p data cfg
-COPY --from=yolo-models /models/coco.names ./data/coco.names
+
+# YOLO 모델 파일들 복사
+RUN mkdir -p cfg data
 COPY --from=yolo-models /models/yolov4.cfg ./cfg/yolov4.cfg
 COPY --from=yolo-models /models/yolov4.weights ./yolov4.weights
-RUN ldconfig && \
-    mkdir -p /tmp/ui-automation /app/logs && \
+COPY --from=yolo-models /models/coco.names ./coco.names
+
+# 디렉토리 권한 설정
+RUN mkdir -p /tmp/ui-automation /app/logs && \
     chmod 755 /tmp/ui-automation /app/logs && \
     groupadd -r appuser && \
     useradd -r -g appuser -d /app -s /sbin/nologin appuser && \
     chown -R appuser:appuser /app /tmp/ui-automation && \
     chmod +x ui-automation
+
 USER appuser
-ENV GIN_MODE=release TMPDIR=/tmp/ui-automation
+
+# 환경 변수 설정
+ENV GIN_MODE=release 
+ENV TMPDIR=/tmp/ui-automation
+
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+
+# 헬스체크
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
+
 CMD ["./ui-automation"]
 
 # ==================== 빌드 & 사용 가이드 ====================
-
-#  빌드 명령어:
-#  sudo docker build -t ui-automation:latest .
-
-#  실행:
-#  docker run -p 8000:8000 -e OPENAI_API_KEY=your_key ui-automation:latest
-
-#  캐시 활용한 빠른 재빌드:
-#  docker build -t ui-automation:latest . --cache-from ui-automation:latest
-
-#  개발 모드 (볼륨 마운트):
-#  docker run -p 8000:8000 -v $(pwd):/app/src -e OPENAI_API_KEY=your_key ui-automation:latest
-
-#  이미지 크기 확인:
-#  docker images ui-automation:latest
-
-#  빌드 캐시 정리:
-#  docker builder prune
+#
+# 빌드:
+# docker build -t ui-automation:yolo .
+#
+# 실행:
+# docker run -p 8000:8000 -e OPENAI_API_KEY=your_key ui-automation:yolo
+#
+# 개발 모드:
+# docker run -p 8000:8000 -v $(pwd):/app/src -e OPENAI_API_KEY=your_key ui-automation:yolo

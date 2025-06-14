@@ -3,7 +3,6 @@ module server
 go 1.23.6
 
 require (
-	github.com/LdDl/go-darknet v1.3.7
 	github.com/gin-contrib/cors v1.7.5
 	github.com/gin-gonic/gin v1.10.1
 	github.com/google/uuid v1.6.0
@@ -33,7 +32,6 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
-	golang.org/x/image v0.0.0-20211028202545-6944b10bf410 // indirect
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
