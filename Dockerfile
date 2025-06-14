@@ -63,11 +63,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     make \
     libopencv-dev \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Darknet 소스 클론 및 빌드 (특정 커밋 고정으로 안정성 확보)
 RUN echo "🔨 Darknet 빌드 시작..." && \
-    git clone https://github.com/AlexeyAB/darknet.git /darknet
+    ( git clone https://github.com/AlexeyAB/darknet.git /darknet || \
+      git -c http.sslVerify=false clone https://github.com/AlexeyAB/darknet.git /darknet || \
+      ( echo "⚠️  HTTPS 클론 실패, HTTP 시도 중..." && \
+        git clone http://github.com/AlexeyAB/darknet.git /darknet ) || \
+      ( echo "⚠️  AlexeyAB/darknet 실패, pjreddie/darknet 시도 중..." && \
+        git clone --depth 1 https://github.com/pjreddie/darknet.git /darknet ) ) && \
+    echo "✅ Darknet 소스 클론 완료"
 
 WORKDIR /darknet
 
@@ -124,7 +131,7 @@ COPY . .
 # 환경변수 설정
 ENV CGO_ENABLED=1
 ENV GOOS=linux
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
 # Go 애플리케이션 빌드 (최적화된 플래그)
 RUN echo "🏗️  Go 애플리케이션 빌드 중..." && \
