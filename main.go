@@ -707,6 +707,66 @@ func analyzeHandler(c *gin.Context) {
 	})
 }
 
+func visualizeHandler(c *gin.Context) {
+	requestStart := time.Now()
+	requestID := uuid.New().String()[:8]
+
+	file, err := c.FormFile("image")
+	if err != nil {
+		log.Printf("Request %s failed - missing image file parameter: %v", requestID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Image file required"})
+		return
+	}
+
+	log.Printf("Processing visualization request %s - image: %s (%.2f KB)",
+		requestID, file.Filename, float64(file.Size)/1024)
+
+	tempID := uuid.New().String()
+	originalImagePath := filepath.Join(os.TempDir(), fmt.Sprintf("visualization_%s_%s.png", requestID, tempID))
+
+	if err := c.SaveUploadedFile(file, originalImagePath); err != nil {
+		log.Printf("Request %s failed - image save error: %v", requestID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save image"})
+		return
+	}
+	defer os.Remove(originalImagePath)
+
+	elements, err := analyzer.DetectUIElements(originalImagePath)
+	if err != nil {
+		log.Printf("Request %s failed - UI detection error: %v", requestID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "UI detection failed"})
+		return
+	}
+
+	labeledImagePath, idToElement, err := analyzer.CreateLabeledImage(originalImagePath, elements)
+	if err != nil {
+		log.Printf("Request %s failed - image labeling error: %v", requestID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Image labeling failed"})
+		return
+	}
+	defer os.Remove(labeledImagePath)
+
+	imageData, err := analyzer.encodeImageToBase64(labeledImagePath)
+	if err != nil {
+		log.Printf("Request %s failed - image encoding error: %v", requestID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Image encoding failed"})
+		return
+	}
+
+	requestDuration := time.Since(requestStart)
+	totalElements := len(elements.YOLOObjects) + len(elements.CVButtons) + len(elements.CVInputs)
+
+	log.Printf("Request %s completed in %v - detected %d elements", requestID, requestDuration, totalElements)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"labeled_image":  "data:image/png;base64," + imageData,
+		"elements":       elements,
+		"element_map":    idToElement,
+		"total_elements": totalElements,
+	})
+}
+
 func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": "healthy", "timestamp": time.Now().Unix(),
@@ -750,6 +810,7 @@ func main() {
 	r.GET("/", rootHandler)
 	r.GET("/health", healthHandler)
 	r.POST("/analyze", analyzeHandler)
+	r.POST("/visualize", visualizeHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -762,6 +823,7 @@ func main() {
 	log.Printf("  GET  / - Service information and capabilities")
 	log.Printf("  GET  /health - Health check and system status")
 	log.Printf("  POST /analyze - UI element analysis and AI selection")
+	log.Printf("  POST /visualize - UI element detection with labeled image")
 	log.Printf("Server listening on port %s - ready to process UI automation requests", port)
 
 	if err := r.Run(":" + port); err != nil {
