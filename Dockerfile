@@ -52,7 +52,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=go-builder /app/ui-automation .
 COPY --from=go-builder /usr/local/lib/libdarknet.so /usr/local/lib/
-COPY --from=yolo-models /models/ ./models/
+RUN mkdir -p data cfg
+COPY --from=yolo-models /models/coco.names ./data/coco.names
+COPY --from=yolo-models /models/yolov4.cfg ./cfg/yolov4.cfg
+COPY --from=yolo-models /models/yolov4.weights ./yolov4.weights
 RUN ldconfig && \
     mkdir -p /tmp/ui-automation /app/logs && \
     chmod 755 /tmp/ui-automation /app/logs && \

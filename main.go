@@ -90,8 +90,8 @@ func NewUIAnalyzer() (*UIAnalyzer, error) {
 
 	yoloDetector := &darknet.YOLONetwork{
 		GPUDeviceIndex:           0,
-		NetworkConfigurationFile: "models/yolov4.cfg",
-		WeightsFile:              "models/yolov4.weights",
+		NetworkConfigurationFile: "cfg/yolov4.cfg",
+		WeightsFile:              "yolov4.weights",
 		Threshold:                0.25,
 	}
 
