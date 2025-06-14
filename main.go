@@ -549,9 +549,16 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 	elementID := 1
 
 	colors := map[string]color.RGBA{
-		"yolo":      {255, 0, 0, 255},   // 빨간색
-		"cv_button": {0, 255, 0, 255},   // 녹색
-		"cv_input":  {255, 165, 0, 255}, // 주황색
+		"yolo":      {255, 0, 0, 255},   // 빨간색 - YOLO 객체
+		"cv_button": {0, 200, 0, 255},   // 진한 녹색 - 버튼
+		"cv_input":  {255, 140, 0, 255}, // 주황색 - 입력 필드
+	}
+
+	// 숫자 색상 (가독성을 위해 진한 색상 사용)
+	numberColors := map[string]color.RGBA{
+		"yolo":      {139, 0, 0, 255},  // 진한 빨간색
+		"cv_button": {0, 100, 0, 255},  // 진한 녹색
+		"cv_input":  {204, 85, 0, 255}, // 진한 주황색
 	}
 
 	// 모든 요소 그리기
@@ -560,16 +567,20 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 		idToElement[elementID] = element
 
 		var elementColor color.RGBA
+		var numberColor color.RGBA
 		if strings.HasPrefix(element.Type, "yolo") {
 			elementColor = colors["yolo"]
+			numberColor = numberColors["yolo"]
 		} else if strings.Contains(element.Type, "button") {
 			elementColor = colors["cv_button"]
+			numberColor = numberColors["cv_button"]
 		} else {
 			elementColor = colors["cv_input"]
+			numberColor = numberColors["cv_input"]
 		}
 
 		ua.drawRectangle(labeledImg, element.BBox, elementColor)
-		ua.drawText(labeledImg, element.Center, strconv.Itoa(elementID), elementColor)
+		ua.drawTextWithColor(labeledImg, element.Center, strconv.Itoa(elementID), numberColor)
 		elementID++
 	}
 
@@ -586,7 +597,7 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 	return tempFile.Name(), idToElement, nil
 }
 
-func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RGBA) {
+func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, clr color.RGBA) {
 	bounds := img.Bounds()
 
 	// 두께 2픽셀의 사각형
@@ -594,10 +605,10 @@ func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RG
 		for x := bbox[0]; x <= bbox[2]; x++ {
 			if x >= bounds.Min.X && x < bounds.Max.X {
 				if bbox[1]+thickness >= bounds.Min.Y && bbox[1]+thickness < bounds.Max.Y {
-					img.Set(x, bbox[1]+thickness, color)
+					img.Set(x, bbox[1]+thickness, clr)
 				}
 				if bbox[3]-thickness >= bounds.Min.Y && bbox[3]-thickness < bounds.Max.Y {
-					img.Set(x, bbox[3]-thickness, color)
+					img.Set(x, bbox[3]-thickness, clr)
 				}
 			}
 		}
@@ -605,26 +616,161 @@ func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RG
 		for y := bbox[1]; y <= bbox[3]; y++ {
 			if y >= bounds.Min.Y && y < bounds.Max.Y {
 				if bbox[0]+thickness >= bounds.Min.X && bbox[0]+thickness < bounds.Max.X {
-					img.Set(bbox[0]+thickness, y, color)
+					img.Set(bbox[0]+thickness, y, clr)
 				}
 				if bbox[2]-thickness >= bounds.Min.X && bbox[2]-thickness < bounds.Max.X {
-					img.Set(bbox[2]-thickness, y, color)
+					img.Set(bbox[2]-thickness, y, clr)
 				}
 			}
 		}
 	}
 }
 
-func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, color color.RGBA) {
+func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
+	// 큰 숫자 그리기 (픽셀 아트 방식으로 숫자 형태 그리기)
+	ua.drawLargeNumber(img, center, text, clr)
+}
+
+func (ua *UIAnalyzer) drawTextWithColor(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
+	// 큰 숫자 그리기 (픽셀 아트 방식으로 숫자 형태 그리기)
+	ua.drawLargeNumber(img, center, text, clr)
+}
+
+func (ua *UIAnalyzer) drawLargeNumber(img *image.RGBA, center [2]int, number string, clr color.RGBA) {
 	bounds := img.Bounds()
 
-	// 중심에 원 그리기
-	for dx := -3; dx <= 3; dx++ {
-		for dy := -3; dy <= 3; dy++ {
+	// 숫자 길이에 따라 배경 크기 조정
+	numDigits := len(number)
+	bgWidth := 10 + numDigits*8 // 숫자당 8픽셀 + 여백
+	bgHeight := 20
+
+	// 배경 사각형 그리기 (흰색)
+	bgColor := color.RGBA{255, 255, 255, 255}
+	for dx := -bgWidth; dx <= bgWidth; dx++ {
+		for dy := -bgHeight / 2; dy <= bgHeight/2; dy++ {
 			x, y := center[0]+dx, center[1]+dy
 			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
-				if dx*dx+dy*dy <= 9 {
-					img.Set(x, y, color)
+				img.Set(x, y, bgColor)
+			}
+		}
+	}
+
+	// 테두리 그리기
+	borderColor := color.RGBA{0, 0, 0, 255} // 검은색 테두리
+	for dx := -bgWidth - 1; dx <= bgWidth+1; dx++ {
+		for dy := -bgHeight/2 - 1; dy <= bgHeight/2+1; dy++ {
+			x, y := center[0]+dx, center[1]+dy
+			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+				if dx == -bgWidth-1 || dx == bgWidth+1 || dy == -bgHeight/2-1 || dy == bgHeight/2+1 {
+					img.Set(x, y, borderColor)
+				}
+			}
+		}
+	}
+
+	// 각 숫자를 그리기
+	startX := center[0] - (numDigits-1)*4 // 중앙 정렬을 위한 시작 위치
+	for i, digit := range number {
+		digitCenter := [2]int{startX + i*8, center[1]}
+		ua.drawDigit(img, digitCenter, byte(digit), clr)
+	}
+}
+
+func (ua *UIAnalyzer) drawDigit(img *image.RGBA, center [2]int, digit byte, clr color.RGBA) {
+	bounds := img.Bounds()
+
+	// 5x7 픽셀 패턴으로 숫자 그리기 (작고 선명하게)
+	patterns := map[byte][][]bool{
+		'0': {
+			{true, true, true},
+			{true, false, true},
+			{true, false, true},
+			{true, false, true},
+			{true, true, true},
+		},
+		'1': {
+			{false, true, false},
+			{true, true, false},
+			{false, true, false},
+			{false, true, false},
+			{true, true, true},
+		},
+		'2': {
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+			{true, false, false},
+			{true, true, true},
+		},
+		'3': {
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+		},
+		'4': {
+			{true, false, true},
+			{true, false, true},
+			{true, true, true},
+			{false, false, true},
+			{false, false, true},
+		},
+		'5': {
+			{true, true, true},
+			{true, false, false},
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+		},
+		'6': {
+			{true, true, true},
+			{true, false, false},
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+		},
+		'7': {
+			{true, true, true},
+			{false, false, true},
+			{false, true, false},
+			{false, true, false},
+			{false, true, false},
+		},
+		'8': {
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+		},
+		'9': {
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+		},
+	}
+
+	pattern, exists := patterns[digit]
+	if !exists {
+		return
+	}
+
+	// 패턴 그리기 (1.5배 확대)
+	for row, rowPattern := range pattern {
+		for col, pixel := range rowPattern {
+			if pixel {
+				// 각 픽셀을 1.5x1.5로 그리기
+				for dy := 0; dy < 2; dy++ {
+					for dx := 0; dx < 2; dx++ {
+						x := center[0] - 3 + col*2 + dx
+						y := center[1] - 5 + row*2 + dy
+						if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+							img.Set(x, y, clr)
+						}
+					}
 				}
 			}
 		}
@@ -641,33 +787,21 @@ func (ua *UIAnalyzer) SelectElementWithAI(labeledImagePath, userGoal string, idT
 		return nil, err
 	}
 
-	var elementInfo []string
-	for elementID, element := range idToElement {
-		text := element.Text
-		if text == "" {
-			text = element.ClassName
-		}
-		if text == "" {
-			text = element.Type
-		}
-		elementInfo = append(elementInfo, fmt.Sprintf("ID%d: %s (%.2f) at %v",
-			elementID, text, element.Confidence, element.Center))
-	}
+	prompt := fmt.Sprintf(`Look at this UI screenshot with numbered elements and select the best element for the user's goal: "%s"
 
-	prompt := fmt.Sprintf(`Analyze this UI and select the best element for: "%s"
+Instructions:
+- Each UI element has a white circle with a number inside it
+- 🔴 Red boxes = YOLO detected objects (general objects like person, bottle, etc.)
+- 🟢 Green boxes = Clickable buttons and interactive elements  
+- 🟠 Orange boxes = Input fields and text areas
 
-Elements detected:
-%s
+Analyze the image and select the number (ID) of the element that best matches the user's goal.
 
-🔴 Red boxes = YOLO objects (general objects like person, bottle, etc.)
-🟢 Green boxes = CV buttons (clickable UI elements)  
-🟠 Orange boxes = CV input fields (text input areas)
-
-Select the element ID that best matches the user's goal. Respond in JSON:
+Respond ONLY in JSON format:
 {
     "selected_id": 3,
-    "reasoning": "Selected the login button because..."
-}`, userGoal, strings.Join(elementInfo, "\n"))
+    "reasoning": "Selected element 3 because it appears to be the login button based on its position and context"
+}`, userGoal)
 
 	resp, err := ua.openaiClient.CreateChatCompletion(
 		context.Background(),
@@ -915,20 +1049,21 @@ func rootHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"service":      "Safe YOLO UI Automation Server",
-		"version":      "5.0.0-stable",
+		"service":      "Visual ID Selection UI Automation Server",
+		"version":      "6.0.0-visual",
 		"status":       "operational",
 		"capabilities": capabilities,
 		"yolo_enabled": analyzer != nil && analyzer.yoloEnabled,
 		"yolo_backend": "GoCV (Safe)",
 		"crash_free":   true,
-		"description":  "YOLO powered by GoCV - stable and reliable!",
+		"description":  "Visual ID labeling - GPT selects by seeing numbered elements!",
 	})
 }
 
 func main() {
-	log.Println("🚀 Starting Safe YOLO UI Automation Server...")
+	log.Println("🚀 Starting Visual ID Selection UI Automation Server...")
 	log.Println("   Using GoCV for stable YOLO inference")
+	log.Println("   📋 GPT selects elements by seeing numbered labels on image!")
 
 	// 메모리 최적화
 	debug.SetGCPercent(50)
@@ -967,7 +1102,7 @@ func main() {
 
 	log.Printf("✅ Server ready on port %s", port)
 	log.Printf("🔴 YOLO enabled: %t (GoCV)", analyzer.yoloEnabled)
-	log.Printf("🛡️ 100%% crash-free guaranteed!")
+	log.Printf("📋 Visual ID labeling enabled - GPT sees numbered elements!")
 
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Server failed: %v", err)
