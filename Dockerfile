@@ -12,9 +12,9 @@ RUN set -e && \
     FILESIZE=$(stat -c%s yolov4.weights) && \
     [ ${FILESIZE} -gt 240000000 ] && [ ${FILESIZE} -lt 260000000 ]
 
-FROM debian:bullseye-slim AS darknet-builder
+FROM gocv/opencv:4.11.0 AS darknet-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential pkg-config make libopencv-dev ca-certificates \
+    git build-essential pkg-config make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN ( git clone https://github.com/AlexeyAB/darknet.git /darknet || \
       git -c http.sslVerify=false clone https://github.com/AlexeyAB/darknet.git /darknet || \
@@ -45,11 +45,9 @@ ENV CGO_CFLAGS="-I/usr/local/include -I/usr/local/include/darknet"
 ENV CGO_LDFLAGS="-L/usr/local/lib -ldarknet"
 RUN go build -ldflags="-s -w" -tags netgo -o ui-automation .
 
-FROM debian:bullseye-slim
+FROM gocv/opencv:4.11.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl libc6 libgcc-s1 libgomp1 libstdc++6 \
-    libopencv-core4.5 libopencv-imgproc4.5 libopencv-imgcodecs4.5 \
-    libopencv-videoio4.5 libopencv-highgui4.5 \
+    ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* && apt-get clean
 WORKDIR /app
 COPY --from=go-builder /app/ui-automation .
