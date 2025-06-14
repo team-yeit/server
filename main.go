@@ -652,6 +652,14 @@ func (ua *UIAnalyzer) processYOLOOutput(data []float32, rows, cols, imgWidth, im
 	return nil
 }
 
+// Helper function for absolute value of integers
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 	img := gocv.IMRead(imagePath, gocv.IMReadGrayScale)
 	if img.Empty() {
@@ -661,7 +669,7 @@ func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 
 	var buttons []UIElement
 
-	// 적응형 임계값 + 윤곽선 검출
+	// 방법 1: 적응형 임계값 + 윤곽선 검출 (더 관대한 파라미터)
 	thresh := gocv.NewMat()
 	defer thresh.Close()
 	gocv.AdaptiveThreshold(img, &thresh, 255, gocv.AdaptiveThresholdGaussian, gocv.ThresholdBinaryInv, 11, 2)
@@ -673,19 +681,148 @@ func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 		contour := contours.At(i)
 		area := gocv.ContourArea(contour)
 
+		// 더 작은 버튼도 감지 (300부터)
+		if area > 300 && area < 150000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			// 더 넓은 종횡비 허용
+			if aspectRatio > 0.2 && aspectRatio < 20.0 && rect.Dx() > 20 && rect.Dy() > 15 {
+				rectArea := float64(rect.Dx() * rect.Dy())
+				if area/rectArea > 0.3 { // 더 관대한 충실도
+					buttons = append(buttons, UIElement{
+						Type:       "cv_button",
+						Confidence: 0.7,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
+			}
+		}
+	}
+
+	// 방법 2: 에지 감지 + 모폴로지 연산
+	edges := gocv.NewMat()
+	defer edges.Close()
+	gocv.Canny(img, &edges, 20, 60) // 더 낮은 임계값
+
+	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(3, 3))
+	defer kernel.Close()
+
+	closed := gocv.NewMat()
+	defer closed.Close()
+	gocv.MorphologyEx(edges, &closed, gocv.MorphClose, kernel)
+
+	contours2 := gocv.FindContours(closed, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours2.Close()
+
+	for i := 0; i < contours2.Size(); i++ {
+		contour := contours2.At(i)
+		area := gocv.ContourArea(contour)
+
+		if area > 500 && area < 100000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			if aspectRatio > 0.2 && aspectRatio < 15.0 && rect.Dx() > 25 && rect.Dy() > 15 {
+				// 중복 검사
+				isDuplicate := false
+				newCenter := [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2}
+
+				for _, existing := range buttons {
+					dx := abs(existing.Center[0] - newCenter[0])
+					dy := abs(existing.Center[1] - newCenter[1])
+					if dx < 15 && dy < 15 { // 더 엄격한 중복 검사
+						isDuplicate = true
+						break
+					}
+				}
+
+				if !isDuplicate {
+					buttons = append(buttons, UIElement{
+						Type:       "cv_button_edge",
+						Confidence: 0.65,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     newCenter,
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
+			}
+		}
+	}
+
+	// 방법 3: 그래디언트 기반 감지 (버튼 경계 강화)
+	gradX := gocv.NewMat()
+	gradY := gocv.NewMat()
+	defer gradX.Close()
+	defer gradY.Close()
+
+	gocv.Sobel(img, &gradX, gocv.MatTypeCV16S, 1, 0, 3, 1, 0, gocv.BorderDefault)
+	gocv.Sobel(img, &gradY, gocv.MatTypeCV16S, 0, 1, 3, 1, 0, gocv.BorderDefault)
+
+	absGradX := gocv.NewMat()
+	absGradY := gocv.NewMat()
+	defer absGradX.Close()
+	defer absGradY.Close()
+
+	gocv.ConvertScaleAbs(gradX, &absGradX, 1, 0)
+	gocv.ConvertScaleAbs(gradY, &absGradY, 1, 0)
+
+	grad := gocv.NewMat()
+	defer grad.Close()
+	gocv.AddWeighted(absGradX, 0.5, absGradY, 0.5, 0, &grad)
+
+	// 그래디언트 임계값
+	gradThresh := gocv.NewMat()
+	defer gradThresh.Close()
+	gocv.Threshold(grad, &gradThresh, 30, 255, gocv.ThresholdBinary)
+
+	// 큰 커널로 연결
+	bigKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(7, 7))
+	defer bigKernel.Close()
+
+	dilated := gocv.NewMat()
+	defer dilated.Close()
+	gocv.MorphologyEx(gradThresh, &dilated, gocv.MorphClose, bigKernel)
+
+	contours3 := gocv.FindContours(dilated, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours3.Close()
+
+	for i := 0; i < contours3.Size(); i++ {
+		contour := contours3.At(i)
+		area := gocv.ContourArea(contour)
+
 		if area > 800 && area < 50000 {
 			rect := gocv.BoundingRect(contour)
 			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
 
-			if aspectRatio > 0.3 && aspectRatio < 8.0 && rect.Dx() > 30 && rect.Dy() > 20 {
-				buttons = append(buttons, UIElement{
-					Type:       "cv_button",
-					Confidence: 0.8,
-					BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
-					Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
-					Width:      rect.Dx(),
-					Height:     rect.Dy(),
-				})
+			if aspectRatio > 0.3 && aspectRatio < 10.0 && rect.Dx() > 30 && rect.Dy() > 20 {
+				// 중복 검사
+				isDuplicate := false
+				newCenter := [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2}
+
+				for _, existing := range buttons {
+					dx := abs(existing.Center[0] - newCenter[0])
+					dy := abs(existing.Center[1] - newCenter[1])
+					if dx < 20 && dy < 20 {
+						isDuplicate = true
+						break
+					}
+				}
+
+				if !isDuplicate {
+					buttons = append(buttons, UIElement{
+						Type:       "cv_button_gradient",
+						Confidence: 0.6,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     newCenter,
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
 			}
 		}
 	}
@@ -702,13 +839,13 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 
 	var inputs []UIElement
 
-	// 에지 검출
+	// 방법 1: 수평 에지 감지 (입력 필드의 경계)
 	edges := gocv.NewMat()
 	defer edges.Close()
-	gocv.Canny(img, &edges, 30, 100)
+	gocv.Canny(img, &edges, 20, 80) // 더 민감한 에지 감지
 
-	// 수평 구조 요소
-	horizontalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(25, 1))
+	// 수평 구조 요소 (입력 필드 감지용)
+	horizontalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(20, 1))
 	defer horizontalKernel.Close()
 
 	detectHorizontal := gocv.NewMat()
@@ -722,11 +859,12 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 		contour := contours.At(i)
 		area := gocv.ContourArea(contour)
 
-		if area > 1000 && area < 30000 {
+		if area > 300 && area < 50000 { // 더 작은 입력 필드도 감지
 			rect := gocv.BoundingRect(contour)
 			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
 
-			if aspectRatio > 2.5 && rect.Dx() > 80 && rect.Dy() > 15 && rect.Dy() < 60 {
+			// 입력 필드 특성: 긴 직사각형
+			if aspectRatio > 1.5 && rect.Dx() > 60 && rect.Dy() > 10 && rect.Dy() < 100 {
 				inputs = append(inputs, UIElement{
 					Type:       "cv_input_field",
 					Confidence: 0.8,
@@ -735,6 +873,102 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 					Width:      rect.Dx(),
 					Height:     rect.Dy(),
 				})
+			}
+		}
+	}
+
+	// 방법 2: 사각형 패턴 감지 (테두리가 있는 입력 필드)
+	blur := gocv.NewMat()
+	defer blur.Close()
+	gocv.GaussianBlur(img, &blur, image.Pt(3, 3), 0, 0, gocv.BorderDefault)
+
+	thresh := gocv.NewMat()
+	defer thresh.Close()
+	gocv.AdaptiveThreshold(blur, &thresh, 255, gocv.AdaptiveThresholdMean, gocv.ThresholdBinary, 15, 10)
+
+	contours2 := gocv.FindContours(thresh, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours2.Close()
+
+	for i := 0; i < contours2.Size(); i++ {
+		contour := contours2.At(i)
+		area := gocv.ContourArea(contour)
+
+		if area > 1000 && area < 40000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			// 입력 필드 특성
+			if aspectRatio > 2.0 && rect.Dx() > 80 && rect.Dy() > 15 && rect.Dy() < 80 {
+				// 중복 검사
+				isDuplicate := false
+				newCenter := [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2}
+
+				for _, existing := range inputs {
+					dx := abs(existing.Center[0] - newCenter[0])
+					dy := abs(existing.Center[1] - newCenter[1])
+					if dx < 25 && dy < 15 {
+						isDuplicate = true
+						break
+					}
+				}
+
+				if !isDuplicate {
+					inputs = append(inputs, UIElement{
+						Type:       "cv_input_rect",
+						Confidence: 0.75,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     newCenter,
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
+			}
+		}
+	}
+
+	// 방법 3: 텍스트 라인 감지 (입력 필드 내 텍스트 영역)
+	textKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(10, 2))
+	defer textKernel.Close()
+
+	textAreas := gocv.NewMat()
+	defer textAreas.Close()
+	gocv.MorphologyEx(edges, &textAreas, gocv.MorphClose, textKernel)
+
+	contours3 := gocv.FindContours(textAreas, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours3.Close()
+
+	for i := 0; i < contours3.Size(); i++ {
+		contour := contours3.At(i)
+		area := gocv.ContourArea(contour)
+
+		if area > 800 && area < 30000 {
+			rect := gocv.BoundingRect(contour)
+			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
+
+			if aspectRatio > 2.5 && rect.Dx() > 70 && rect.Dy() > 12 && rect.Dy() < 60 {
+				// 중복 검사
+				isDuplicate := false
+				newCenter := [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2}
+
+				for _, existing := range inputs {
+					dx := abs(existing.Center[0] - newCenter[0])
+					dy := abs(existing.Center[1] - newCenter[1])
+					if dx < 30 && dy < 12 {
+						isDuplicate = true
+						break
+					}
+				}
+
+				if !isDuplicate {
+					inputs = append(inputs, UIElement{
+						Type:       "cv_input_text",
+						Confidence: 0.7,
+						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center:     newCenter,
+						Width:      rect.Dx(),
+						Height:     rect.Dy(),
+					})
+				}
 			}
 		}
 	}
@@ -839,14 +1073,223 @@ func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, clr color.RGBA
 	}
 }
 
-func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
-	// 큰 숫자 그리기 (픽셀 아트 방식으로 숫자 형태 그리기)
-	ua.drawLargeNumber(img, center, text, clr)
+func (ua *UIAnalyzer) drawTextWithColor(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
+	// 스마트한 라벨 위치 결정
+	ua.drawSmartLabel(img, center, text, clr)
 }
 
-func (ua *UIAnalyzer) drawTextWithColor(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
-	// 큰 숫자 그리기 (픽셀 아트 방식으로 숫자 형태 그리기)
-	ua.drawLargeNumber(img, center, text, clr)
+func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
+	// 스마트한 라벨 위치 결정
+	ua.drawSmartLabel(img, center, text, clr)
+}
+
+func (ua *UIAnalyzer) drawSmartLabel(img *image.RGBA, center [2]int, text string, clr color.RGBA) {
+	bounds := img.Bounds()
+
+	// 라벨 크기 계산
+	numDigits := len(text)
+	labelWidth := 8 + numDigits*6 // 더 작은 라벨
+	labelHeight := 16
+
+	// 최적 위치 찾기 (요소 외부)
+	positions := []struct {
+		name string
+		x, y int
+	}{
+		{"top-left", center[0] - 25, center[1] - 25},     // 좌상단
+		{"top-right", center[0] + 25, center[1] - 25},    // 우상단
+		{"bottom-left", center[0] - 25, center[1] + 25},  // 좌하단
+		{"bottom-right", center[0] + 25, center[1] + 25}, // 우하단
+		{"left", center[0] - 35, center[1]},              // 좌측
+		{"right", center[0] + 35, center[1]},             // 우측
+		{"top", center[0], center[1] - 30},               // 상단
+		{"bottom", center[0], center[1] + 30},            // 하단
+	}
+
+	// 첫 번째로 경계 내에 있는 위치 사용
+	var labelPos [2]int
+	found := false
+
+	for _, pos := range positions {
+		// 라벨이 이미지 경계 내에 있는지 확인
+		if pos.x-labelWidth/2 >= bounds.Min.X &&
+			pos.x+labelWidth/2 < bounds.Max.X &&
+			pos.y-labelHeight/2 >= bounds.Min.Y &&
+			pos.y+labelHeight/2 < bounds.Max.Y {
+			labelPos = [2]int{pos.x, pos.y}
+			found = true
+			break
+		}
+	}
+
+	// 적절한 위치를 찾지 못한 경우 중앙 사용 (작은 라벨로)
+	if !found {
+		labelPos = center
+		labelWidth = 12 // 매우 작은 라벨
+		labelHeight = 12
+	}
+
+	// 반투명 배경 그리기
+	bgColor := color.RGBA{255, 255, 255, 200} // 80% 불투명도
+	borderColor := color.RGBA{0, 0, 0, 255}   // 검은색 테두리
+
+	// 배경 사각형
+	for dx := -labelWidth / 2; dx <= labelWidth/2; dx++ {
+		for dy := -labelHeight / 2; dy <= labelHeight/2; dy++ {
+			x, y := labelPos[0]+dx, labelPos[1]+dy
+			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+				// 알파 블렌딩 효과
+				existing := img.RGBAAt(x, y)
+				blended := color.RGBA{
+					R: uint8((int(bgColor.R)*int(bgColor.A) + int(existing.R)*(255-int(bgColor.A))) / 255),
+					G: uint8((int(bgColor.G)*int(bgColor.A) + int(existing.G)*(255-int(bgColor.A))) / 255),
+					B: uint8((int(bgColor.B)*int(bgColor.A) + int(existing.B)*(255-int(bgColor.A))) / 255),
+					A: 255,
+				}
+				img.Set(x, y, blended)
+			}
+		}
+	}
+
+	// 테두리 그리기
+	ua.drawBorder(img, labelPos, labelWidth, labelHeight, borderColor)
+
+	// 숫자 그리기 (더 작고 선명하게)
+	ua.drawCompactNumber(img, labelPos, text, clr)
+
+	// 중심점에 작은 점 표시 (요소 중심 확인용)
+	for dx := -2; dx <= 2; dx++ {
+		for dy := -2; dy <= 2; dy++ {
+			x, y := center[0]+dx, center[1]+dy
+			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+				if dx*dx+dy*dy <= 4 {
+					img.Set(x, y, clr)
+				}
+			}
+		}
+	}
+}
+
+func (ua *UIAnalyzer) drawBorder(img *image.RGBA, center [2]int, width, height int, borderColor color.RGBA) {
+	bounds := img.Bounds()
+
+	// 테두리 그리기
+	for dx := -width/2 - 1; dx <= width/2+1; dx++ {
+		for dy := -height/2 - 1; dy <= height/2+1; dy++ {
+			x, y := center[0]+dx, center[1]+dy
+			if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+				// 테두리 조건
+				if dx == -width/2-1 || dx == width/2+1 || dy == -height/2-1 || dy == height/2+1 {
+					img.Set(x, y, borderColor)
+				}
+			}
+		}
+	}
+}
+
+func (ua *UIAnalyzer) drawCompactNumber(img *image.RGBA, center [2]int, number string, clr color.RGBA) {
+	// 각 숫자를 그리기 (더 작은 크기)
+	startX := center[0] - (len(number)-1)*3 // 더 밀집되게
+	for i, digit := range number {
+		digitCenter := [2]int{startX + i*6, center[1]}
+		ua.drawSmallDigit(img, digitCenter, byte(digit), clr)
+	}
+}
+
+func (ua *UIAnalyzer) drawSmallDigit(img *image.RGBA, center [2]int, digit byte, clr color.RGBA) {
+	bounds := img.Bounds()
+
+	// 3x5 픽셀 패턴으로 숫자 그리기 (매우 작고 선명)
+	patterns := map[byte][][]bool{
+		'0': {
+			{true, true, true},
+			{true, false, true},
+			{true, false, true},
+			{true, false, true},
+			{true, true, true},
+		},
+		'1': {
+			{false, true, false},
+			{true, true, false},
+			{false, true, false},
+			{false, true, false},
+			{true, true, true},
+		},
+		'2': {
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+			{true, false, false},
+			{true, true, true},
+		},
+		'3': {
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+		},
+		'4': {
+			{true, false, true},
+			{true, false, true},
+			{true, true, true},
+			{false, false, true},
+			{false, false, true},
+		},
+		'5': {
+			{true, true, true},
+			{true, false, false},
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+		},
+		'6': {
+			{true, true, true},
+			{true, false, false},
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+		},
+		'7': {
+			{true, true, true},
+			{false, false, true},
+			{false, true, false},
+			{false, true, false},
+			{false, true, false},
+		},
+		'8': {
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+		},
+		'9': {
+			{true, true, true},
+			{true, false, true},
+			{true, true, true},
+			{false, false, true},
+			{true, true, true},
+		},
+	}
+
+	pattern, exists := patterns[digit]
+	if !exists {
+		return
+	}
+
+	// 패턴 그리기 (1:1 크기)
+	for row, rowPattern := range pattern {
+		for col, pixel := range rowPattern {
+			if pixel {
+				x := center[0] - 1 + col
+				y := center[1] - 2 + row
+				if x >= bounds.Min.X && x < bounds.Max.X && y >= bounds.Min.Y && y < bounds.Max.Y {
+					img.Set(x, y, clr)
+				}
+			}
+		}
+	}
 }
 
 func (ua *UIAnalyzer) drawLargeNumber(img *image.RGBA, center [2]int, number string, clr color.RGBA) {
