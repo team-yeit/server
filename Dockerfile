@@ -36,24 +36,7 @@ RUN make clean && \
     make -j$(nproc) LIBSO=1 && \
     echo "✅ Darknet 라이브러리 빌드 완료"
 
-# Go 빌드 단계 (gocv/opencv 베이스 이미지 사용으로 OpenCV 컴파일 시간 제거)
-FROM ghcr.io/hybridgroup/opencv:4.11.0 AS go-builder
-
-# Go 최신 버전 설치 (opencv 이미지가 구버전일 수 있음)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
-
-# Go 1.21 설치 (필요시)
-ENV GO_VERSION=1.21.8
-RUN if ! go version | grep -q "go1.21"; then \
-    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz && \
-    rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz && \
-    rm go${GO_VERSION}.linux-amd64.tar.gz; \
-    fi
-
-ENV PATH=/usr/local/go/bin:$PATH
+FROM gocv/opencv:4.8.1 AS go-builder
 
 # 작업 디렉토리 설정
 WORKDIR /app
