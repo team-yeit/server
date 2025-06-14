@@ -305,7 +305,7 @@ func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 				}
 			}
 		}
-		contour.Close()
+		// Note: Individual contour.Close() removed to prevent double-free memory issues
 	}
 
 	log.Printf("Button detection analysis - total contours: %d, aspect ratio filtered: %d, final buttons: %d",
@@ -357,7 +357,7 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 				validInputs++
 			}
 		}
-		contour.Close()
+		// Note: Individual contour.Close() removed to prevent double-free memory issues
 	}
 
 	log.Printf("Input field detection analysis - total contours: %d, dimension filtered: %d, final input fields: %d",
