@@ -88,7 +88,7 @@ func NewUIAnalyzer() (*UIAnalyzer, error) {
 	log.Println("Initializing intelligent UI automation system with YOLO object detection and OpenAI integration...")
 	startTime := time.Now()
 
-	classNames, err := loadClassNames("coco.names")
+	classNames, err := loadClassNames("models/coco.names")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load COCO class names from file: %v", err)
 	}
@@ -96,8 +96,8 @@ func NewUIAnalyzer() (*UIAnalyzer, error) {
 
 	yoloDetector := &darknet.YOLONetwork{
 		GPUDeviceIndex:           0,
-		NetworkConfigurationFile: "yolov4.cfg",
-		WeightsFile:              "yolov4.weights",
+		NetworkConfigurationFile: "models/yolov4.cfg",
+		WeightsFile:              "models/yolov4.weights",
 		Threshold:                0.25,
 		ClassNames:               classNames,
 		Classes:                  len(classNames),
