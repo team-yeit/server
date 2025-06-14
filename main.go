@@ -28,15 +28,13 @@ import (
 	"gocv.io/x/gocv"
 )
 
-// ==================== 구조체 정의 ====================
-
 type UIElement struct {
 	Type       string  `json:"type"`
 	Text       string  `json:"text,omitempty"`
 	ClassName  string  `json:"class_name,omitempty"`
 	Confidence float64 `json:"confidence"`
-	BBox       [4]int  `json:"bbox"`   // [x1, y1, x2, y2]
-	Center     [2]int  `json:"center"` // [x, y]
+	BBox       [4]int  `json:"bbox"`
+	Center     [2]int  `json:"center"`
 	Width      int     `json:"width"`
 	Height     int     `json:"height"`
 }
@@ -61,8 +59,6 @@ type AIResponse struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// ==================== 유틸리티 함수들 ====================
-
 func loadClassNames(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -78,15 +74,8 @@ func loadClassNames(filePath string) ([]string, error) {
 			classNames = append(classNames, className)
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return classNames, nil
+	return classNames, scanner.Err()
 }
-
-// ==================== UIAnalyzer 클래스 ====================
 
 type UIAnalyzer struct {
 	yoloDetector   *darknet.YOLONetwork
@@ -96,13 +85,14 @@ type UIAnalyzer struct {
 }
 
 func NewUIAnalyzer() (*UIAnalyzer, error) {
-	log.Println("🚀 UI 분석 시스템 초기화 중...")
+	log.Println("Initializing intelligent UI automation system with YOLO object detection and OpenAI integration...")
+	startTime := time.Now()
 
-	// YOLO 모델 초기화 (go-darknet 사용)
 	classNames, err := loadClassNames("coco.names")
 	if err != nil {
-		return nil, fmt.Errorf("클래스명 로드 실패: %v", err)
+		return nil, fmt.Errorf("failed to load COCO class names from file: %v", err)
 	}
+	log.Printf("Successfully loaded %d object classes from COCO dataset for YOLO detection", len(classNames))
 
 	yoloDetector := &darknet.YOLONetwork{
 		GPUDeviceIndex:           0,
@@ -113,147 +103,134 @@ func NewUIAnalyzer() (*UIAnalyzer, error) {
 		Classes:                  len(classNames),
 	}
 
-	err = yoloDetector.Init()
-	if err != nil {
-		return nil, fmt.Errorf("YOLO 초기화 실패: %v", err)
+	if err := yoloDetector.Init(); err != nil {
+		return nil, fmt.Errorf("YOLO network initialization failed - check model files and configuration: %v", err)
 	}
-	log.Println("✅ YOLO 모델 로드 완료")
+	log.Printf("YOLO v4 neural network successfully initialized with confidence threshold %.2f and %d detection classes", yoloDetector.Threshold, yoloDetector.Classes)
 
-	// OpenAI 클라이언트 초기화
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		log.Println("⚠️ OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+		log.Println("WARNING: OPENAI_API_KEY environment variable not set - AI element selection will be disabled")
+	} else {
+		log.Println("OpenAI API client configured successfully for intelligent element selection and reasoning")
 	}
 
 	openaiClient := openai.NewClient(apiKey)
-	log.Println("✅ OpenAI API 연결 완료")
-
-	// UI 클래스 매핑
 	uiClassMapping := map[string]string{
-		"person":     "icon",
-		"book":       "button",
-		"laptop":     "screen",
-		"mouse":      "button",
-		"keyboard":   "input",
-		"cell phone": "device",
-		"tv":         "screen",
-		"remote":     "button",
+		"person": "icon", "book": "button", "laptop": "screen", "mouse": "button",
+		"keyboard": "input", "cell phone": "device", "tv": "screen", "remote": "button",
 	}
 
+	initDuration := time.Since(startTime)
+	log.Printf("UI analysis system fully initialized in %v with YOLO detection, OpenCV processing, and AI selection capabilities", initDuration)
+
 	return &UIAnalyzer{
-		yoloDetector:   yoloDetector,
-		openaiClient:   openaiClient,
-		uiClassMapping: uiClassMapping,
+		yoloDetector: yoloDetector, openaiClient: openaiClient, uiClassMapping: uiClassMapping,
 	}, nil
 }
 
 func (ua *UIAnalyzer) Close() {
 	if ua.yoloDetector != nil {
 		ua.yoloDetector.Close()
+		log.Println("YOLO detector resources cleaned up and released")
 	}
 }
-
-// ==================== UI 요소 검출 ====================
 
 func (ua *UIAnalyzer) DetectUIElements(imagePath string) (*UIElements, error) {
 	ua.mu.RLock()
 	defer ua.mu.RUnlock()
 
-	elements := &UIElements{
-		YOLOObjects: []UIElement{},
-		CVButtons:   []UIElement{},
-		CVInputs:    []UIElement{},
-	}
+	log.Printf("Starting comprehensive UI element detection on image: %s", imagePath)
+	startTime := time.Now()
 
-	// 병렬로 검출 실행
+	elements := &UIElements{YOLOObjects: []UIElement{}, CVButtons: []UIElement{}, CVInputs: []UIElement{}}
 	var wg sync.WaitGroup
 	var yoloErr, cvButtonErr, cvInputErr error
 
-	// YOLO 객체 검출
-	wg.Add(1)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
+		log.Println("Executing YOLO object detection for UI elements recognition...")
 		yoloObjects, err := ua.detectYOLOObjects(imagePath)
 		if err != nil {
 			yoloErr = err
+			log.Printf("YOLO detection failed with error: %v", err)
 			return
 		}
 		elements.YOLOObjects = yoloObjects
+		log.Printf("YOLO detection completed successfully - found %d potential UI objects", len(yoloObjects))
 	}()
 
-	// OpenCV 버튼 검출
-	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Println("Executing OpenCV button detection using contour analysis and morphological operations...")
 		buttons, err := ua.detectCVButtons(imagePath)
 		if err != nil {
 			cvButtonErr = err
+			log.Printf("OpenCV button detection failed with error: %v", err)
 			return
 		}
 		elements.CVButtons = buttons
+		log.Printf("OpenCV button detection completed - identified %d button-like elements", len(buttons))
 	}()
 
-	// OpenCV 입력필드 검출
-	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Println("Executing OpenCV input field detection using edge detection and horizontal kernel filtering...")
 		inputs, err := ua.detectCVInputs(imagePath)
 		if err != nil {
 			cvInputErr = err
+			log.Printf("OpenCV input field detection failed with error: %v", err)
 			return
 		}
 		elements.CVInputs = inputs
+		log.Printf("OpenCV input field detection completed - discovered %d input field candidates", len(inputs))
 	}()
 
 	wg.Wait()
 
-	// 에러 체크
-	if yoloErr != nil {
-		log.Printf("YOLO 검출 오류: %v", yoloErr)
-	}
-	if cvButtonErr != nil {
-		log.Printf("CV 버튼 검출 오류: %v", cvButtonErr)
-	}
-	if cvInputErr != nil {
-		log.Printf("CV 입력 검출 오류: %v", cvInputErr)
+	if yoloErr != nil || cvButtonErr != nil || cvInputErr != nil {
+		log.Printf("Detection errors encountered - YOLO: %v, CV Buttons: %v, CV Inputs: %v", yoloErr, cvButtonErr, cvInputErr)
 	}
 
 	totalElements := len(elements.YOLOObjects) + len(elements.CVButtons) + len(elements.CVInputs)
-	log.Printf("🔍 검출된 UI 요소: %d개", totalElements)
+	detectionDuration := time.Since(startTime)
+	log.Printf("Comprehensive UI element detection completed in %v - total elements detected: %d (YOLO: %d, Buttons: %d, Inputs: %d)",
+		detectionDuration, totalElements, len(elements.YOLOObjects), len(elements.CVButtons), len(elements.CVInputs))
 
 	return elements, nil
 }
 
 func (ua *UIAnalyzer) detectYOLOObjects(imagePath string) ([]UIElement, error) {
-	// 이미지 파일 열기
 	file, err := os.Open(imagePath)
 	if err != nil {
-		return nil, fmt.Errorf("이미지 파일 열기 실패: %v", err)
+		return nil, fmt.Errorf("failed to open image file for YOLO processing: %v", err)
 	}
 	defer file.Close()
 
-	// 이미지 디코딩
-	img, _, err := image.Decode(file)
+	img, format, err := image.Decode(file)
 	if err != nil {
-		return nil, fmt.Errorf("이미지 디코딩 실패: %v", err)
+		return nil, fmt.Errorf("image decoding failed - unsupported format or corrupted file: %v", err)
 	}
+	log.Printf("Image successfully decoded - format: %s, dimensions: %dx%d", format, img.Bounds().Dx(), img.Bounds().Dy())
 
-	// DarknetImage로 변환
 	darknetImg, err := darknet.Image2Float32(img)
 	if err != nil {
-		return nil, fmt.Errorf("DarknetImage 변환 실패: %v", err)
+		return nil, fmt.Errorf("darknet image conversion failed - memory allocation or format issue: %v", err)
 	}
 	defer darknetImg.Close()
 
-	// YOLO 검출 실행
 	detections, err := ua.yoloDetector.Detect(darknetImg)
 	if err != nil {
-		return nil, fmt.Errorf("YOLO 검출 실패: %v", err)
+		return nil, fmt.Errorf("YOLO neural network inference failed: %v", err)
 	}
 
 	var objects []UIElement
+	detectionCount := 0
+	filteredCount := 0
+
 	for _, detection := range detections.Detections {
-		// 가장 높은 확률의 클래스 찾기
+		detectionCount++
 		maxProb := float32(0)
 		bestClassIdx := 0
 		for i, prob := range detection.Probabilities {
@@ -263,12 +240,11 @@ func (ua *UIAnalyzer) detectYOLOObjects(imagePath string) ([]UIElement, error) {
 			}
 		}
 
-		// 신뢰도 임계값 확인
 		if maxProb < 0.25 {
+			filteredCount++
 			continue
 		}
 
-		// 클래스명 가져오기
 		var className string
 		if bestClassIdx < len(detection.ClassNames) {
 			className = detection.ClassNames[bestClassIdx]
@@ -276,55 +252,47 @@ func (ua *UIAnalyzer) detectYOLOObjects(imagePath string) ([]UIElement, error) {
 			className = "unknown"
 		}
 
-		// UI 타입 매핑
 		uiType, exists := ua.uiClassMapping[className]
 		if !exists {
 			uiType = "object"
 		}
 
-		// 바운딩박스 좌표 (StartPoint, EndPoint는 image.Point)
-		x1 := detection.BoundingBox.StartPoint.X
-		y1 := detection.BoundingBox.StartPoint.Y
-		x2 := detection.BoundingBox.EndPoint.X
-		y2 := detection.BoundingBox.EndPoint.Y
-
-		centerX := (x1 + x2) / 2
-		centerY := (y1 + y2) / 2
-		width := x2 - x1
-		height := y2 - y1
+		x1, y1 := detection.BoundingBox.StartPoint.X, detection.BoundingBox.StartPoint.Y
+		x2, y2 := detection.BoundingBox.EndPoint.X, detection.BoundingBox.EndPoint.Y
+		centerX, centerY := (x1+x2)/2, (y1+y2)/2
+		width, height := x2-x1, y2-y1
 
 		objects = append(objects, UIElement{
-			Type:       fmt.Sprintf("yolo_%s", uiType),
-			ClassName:  className,
-			Confidence: float64(maxProb),
-			BBox:       [4]int{x1, y1, x2, y2},
-			Center:     [2]int{centerX, centerY},
-			Width:      width,
-			Height:     height,
+			Type: fmt.Sprintf("yolo_%s", uiType), ClassName: className, Confidence: float64(maxProb),
+			BBox: [4]int{x1, y1, x2, y2}, Center: [2]int{centerX, centerY}, Width: width, Height: height,
 		})
 	}
 
+	log.Printf("YOLO processing results - raw detections: %d, confidence filtered: %d, final objects: %d",
+		detectionCount, filteredCount, len(objects))
 	return objects, nil
 }
 
 func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 	img := gocv.IMRead(imagePath, gocv.IMReadGrayScale)
 	if img.Empty() {
-		return nil, fmt.Errorf("이미지 로드 실패: %s", imagePath)
+		return nil, fmt.Errorf("OpenCV failed to load image for button detection: %s", imagePath)
 	}
 	defer img.Close()
 
-	// 적응형 임계값
+	log.Printf("Processing image for button detection - applying adaptive thresholding and contour analysis...")
 	thresh := gocv.NewMat()
 	defer thresh.Close()
 	gocv.AdaptiveThreshold(img, &thresh, 255, gocv.AdaptiveThresholdGaussian, gocv.ThresholdBinaryInv, 11, 2)
 
-	// 윤곽선 검출
 	contours := gocv.FindContours(thresh, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
 	var buttons []UIElement
-	for i := 0; i < contours.Size(); i++ {
+	totalContours := contours.Size()
+	validContours := 0
+
+	for i := 0; i < totalContours; i++ {
 		contour := contours.At(i)
 		area := gocv.ContourArea(contour)
 
@@ -333,39 +301,38 @@ func (ua *UIAnalyzer) detectCVButtons(imagePath string) ([]UIElement, error) {
 			aspectRatio := float64(rect.Dx()) / float64(rect.Dy())
 
 			if aspectRatio > 0.3 && aspectRatio < 8.0 {
-				// 간단한 검증: 면적과 바운딩 박스 면적 비율
 				rectArea := float64(rect.Dx() * rect.Dy())
-				if area/rectArea > 0.7 { // 바운딩 박스의 70% 이상을 차지하는 경우
+				if area/rectArea > 0.7 {
 					buttons = append(buttons, UIElement{
-						Type:       "cv_button",
-						Confidence: 0.8,
-						BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
-						Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
-						Width:      rect.Dx(),
-						Height:     rect.Dy(),
+						Type: "cv_button", Confidence: 0.8,
+						BBox:   [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+						Center: [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
+						Width:  rect.Dx(), Height: rect.Dy(),
 					})
+					validContours++
 				}
 			}
 		}
 		contour.Close()
 	}
 
+	log.Printf("Button detection analysis - total contours: %d, aspect ratio filtered: %d, final buttons: %d",
+		totalContours, validContours, len(buttons))
 	return buttons, nil
 }
 
 func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 	img := gocv.IMRead(imagePath, gocv.IMReadGrayScale)
 	if img.Empty() {
-		return nil, fmt.Errorf("이미지 로드 실패: %s", imagePath)
+		return nil, fmt.Errorf("OpenCV failed to load image for input field detection: %s", imagePath)
 	}
 	defer img.Close()
 
-	// 엣지 검출
+	log.Printf("Processing image for input field detection - applying Canny edge detection and morphological filtering...")
 	edges := gocv.NewMat()
 	defer edges.Close()
 	gocv.Canny(img, &edges, 30, 100)
 
-	// 수평 커널로 입력필드 감지
 	horizontalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(40, 1))
 	defer horizontalKernel.Close()
 
@@ -373,12 +340,14 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 	defer detectHorizontal.Close()
 	gocv.MorphologyEx(edges, &detectHorizontal, gocv.MorphOpen, horizontalKernel)
 
-	// 윤곽선 검출
 	contours := gocv.FindContours(detectHorizontal, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
 	var inputs []UIElement
-	for i := 0; i < contours.Size(); i++ {
+	totalContours := contours.Size()
+	validInputs := 0
+
+	for i := 0; i < totalContours; i++ {
 		contour := contours.At(i)
 		area := gocv.ContourArea(contour)
 
@@ -388,63 +357,55 @@ func (ua *UIAnalyzer) detectCVInputs(imagePath string) ([]UIElement, error) {
 
 			if aspectRatio > 3.0 && rect.Dx() > 100 && rect.Dy() > 20 && rect.Dy() < 60 {
 				inputs = append(inputs, UIElement{
-					Type:       "cv_input_field",
-					Confidence: 0.7,
-					BBox:       [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
-					Center:     [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
-					Width:      rect.Dx(),
-					Height:     rect.Dy(),
+					Type: "cv_input_field", Confidence: 0.7,
+					BBox:   [4]int{rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y},
+					Center: [2]int{rect.Min.X + rect.Dx()/2, rect.Min.Y + rect.Dy()/2},
+					Width:  rect.Dx(), Height: rect.Dy(),
 				})
+				validInputs++
 			}
 		}
 		contour.Close()
 	}
 
+	log.Printf("Input field detection analysis - total contours: %d, dimension filtered: %d, final input fields: %d",
+		totalContours, validInputs, len(inputs))
 	return inputs, nil
 }
 
-// ==================== 라벨링된 이미지 생성 ====================
-
 func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements) (string, map[int]UIElement, error) {
-	log.Println("🏷️ 라벨링된 이미지 생성 중...")
+	log.Printf("Generating labeled visualization image with element IDs and bounding boxes...")
+	startTime := time.Now()
 
-	// 원본 이미지 로드
 	file, err := os.Open(imagePath)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("failed to open original image for labeling: %v", err)
 	}
 	defer file.Close()
 
-	img, _, err := image.Decode(file)
+	img, format, err := image.Decode(file)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("image decoding failed during label generation: %v", err)
 	}
+	log.Printf("Original image loaded for labeling - format: %s, size: %dx%d", format, img.Bounds().Dx(), img.Bounds().Dy())
 
-	// 새 이미지 생성 (그리기용)
 	bounds := img.Bounds()
 	labeledImg := image.NewRGBA(bounds)
 	draw.Draw(labeledImg, bounds, img, bounds.Min, draw.Src)
 
-	// ID 매핑과 색상 설정
 	idToElement := make(map[int]UIElement)
 	elementID := 1
 
 	colors := map[string]color.RGBA{
-		"yolo":      {255, 0, 0, 255},   // 빨간색
-		"cv_button": {0, 255, 0, 255},   // 초록색
-		"cv_input":  {255, 165, 0, 255}, // 주황색
+		"yolo": {255, 0, 0, 255}, "cv_button": {0, 255, 0, 255}, "cv_input": {255, 165, 0, 255},
 	}
 
-	// 모든 요소에 대해 라벨링
-	allElements := []UIElement{}
-	allElements = append(allElements, elements.YOLOObjects...)
-	allElements = append(allElements, elements.CVButtons...)
-	allElements = append(allElements, elements.CVInputs...)
+	allElements := append(append(elements.YOLOObjects, elements.CVButtons...), elements.CVInputs...)
+	drawnElements := 0
 
 	for _, element := range allElements {
 		idToElement[elementID] = element
 
-		// 색상 선택
 		var elementColor color.RGBA
 		if strings.HasPrefix(element.Type, "yolo") {
 			elementColor = colors["yolo"]
@@ -454,33 +415,30 @@ func (ua *UIAnalyzer) CreateLabeledImage(imagePath string, elements *UIElements)
 			elementColor = colors["cv_input"]
 		}
 
-		// 바운딩 박스 그리기 (간단한 구현)
 		ua.drawRectangle(labeledImg, element.BBox, elementColor)
 		ua.drawText(labeledImg, element.Center, strconv.Itoa(elementID), elementColor)
-
+		drawnElements++
 		elementID++
 	}
 
-	// 임시 파일로 저장
-	tempFile, err := os.CreateTemp("", "labeled_*.png")
+	tempFile, err := os.CreateTemp("", "labeled_ui_*.png")
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("failed to create temporary file for labeled image: %v", err)
 	}
 	defer tempFile.Close()
 
-	err = png.Encode(tempFile, labeledImg)
-	if err != nil {
-		return "", nil, err
+	if err := png.Encode(tempFile, labeledImg); err != nil {
+		return "", nil, fmt.Errorf("PNG encoding failed for labeled image: %v", err)
 	}
 
-	totalElements := len(allElements)
-	log.Printf("✅ 라벨링 이미지 생성 완료: %d개 요소", totalElements)
+	labelingDuration := time.Since(startTime)
+	log.Printf("Labeled image generation completed in %v - elements drawn: %d, output file: %s",
+		labelingDuration, drawnElements, tempFile.Name())
 
 	return tempFile.Name(), idToElement, nil
 }
 
 func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RGBA) {
-	// 간단한 직사각형 그리기 (실제로는 더 정교한 구현 필요)
 	for x := bbox[0]; x <= bbox[2]; x++ {
 		if x >= 0 && x < img.Bounds().Dx() {
 			if bbox[1] >= 0 && bbox[1] < img.Bounds().Dy() {
@@ -504,29 +462,25 @@ func (ua *UIAnalyzer) drawRectangle(img *image.RGBA, bbox [4]int, color color.RG
 }
 
 func (ua *UIAnalyzer) drawText(img *image.RGBA, center [2]int, text string, color color.RGBA) {
-	// 간단한 텍스트 표시 (실제로는 폰트 라이브러리 필요)
-	// 여기서는 중심점에만 마커 표시
 	if center[0] >= 0 && center[0] < img.Bounds().Dx() && center[1] >= 0 && center[1] < img.Bounds().Dy() {
 		img.Set(center[0], center[1], color)
 	}
 }
 
-// ==================== AI 요소 선택 ====================
-
 func (ua *UIAnalyzer) SelectElementWithAI(labeledImagePath, userGoal string, idToElement map[int]UIElement) (*AIResponse, error) {
 	if ua.openaiClient == nil {
-		return nil, fmt.Errorf("OpenAI API가 설정되지 않음")
+		return nil, fmt.Errorf("OpenAI API client not configured - check OPENAI_API_KEY environment variable")
 	}
 
-	log.Printf("🤖 AI가 목표 '%s'에 맞는 요소 선택 중...", userGoal)
+	log.Printf("Initiating AI-powered element selection for user goal: '%s' with %d available elements", userGoal, len(idToElement))
+	startTime := time.Now()
 
-	// 라벨링된 이미지를 base64로 인코딩
 	imageData, err := ua.encodeImageToBase64(labeledImagePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("base64 image encoding failed for AI analysis: %v", err)
 	}
+	log.Printf("Image successfully encoded to base64 for OpenAI vision API - size: %d bytes", len(imageData))
 
-	// ID별 요소 정보 생성
 	var elementInfo []string
 	for elementID, element := range idToElement {
 		text := element.Text
@@ -536,29 +490,31 @@ func (ua *UIAnalyzer) SelectElementWithAI(labeledImagePath, userGoal string, idT
 		if text == "" {
 			text = element.Type
 		}
-		elementInfo = append(elementInfo, fmt.Sprintf("ID%d: %s - '%s' at %v",
-			elementID, element.Type, text, element.Center))
+		elementInfo = append(elementInfo, fmt.Sprintf("ID%d: %s type='%s' confidence=%.2f position=%v size=%dx%d",
+			elementID, element.Type, text, element.Confidence, element.Center, element.Width, element.Height))
 	}
 
-	prompt := fmt.Sprintf(`
-이 스마트폰 화면 이미지를 보고, 사용자의 목표를 달성하기 위해 클릭해야 할 요소의 ID를 하나만 선택해주세요.
+	prompt := fmt.Sprintf(`Analyze this smartphone screen interface and select the most appropriate UI element to achieve the user's goal.
 
-사용자 목표: "%s"
+User Goal: "%s"
 
-이미지에 표시된 요소들:
+Available Interactive Elements:
 %s
 
-다음 JSON 형식으로만 응답해주세요:
+Respond ONLY in this exact JSON format:
 {
     "selected_id": 5,
-    "reasoning": "이메일 변경을 위해 먼저 로그인 버튼을 클릭해야 합니다"
+    "reasoning": "Detailed explanation of why this element was selected based on the user's goal and current screen context"
 }
 
-중요한 규칙:
-1. 반드시 이미지에 표시된 ID 중 하나만 선택하세요
-2. 사용자의 목표를 달성하기 위한 가장 적절한 다음 단계를 선택하세요
-3. 현재 화면 상황을 고려하여 논리적인 선택을 하세요
-4. 반드시 JSON 형식으로만 응답하세요`, userGoal, strings.Join(elementInfo, "\n"))
+Selection Criteria:
+1. Choose exactly ONE element ID from the list above
+2. Select the element that best progresses toward the user's stated goal
+3. Consider the logical sequence of actions required to complete the task
+4. Analyze the current screen state and available options
+5. Provide detailed reasoning explaining your selection strategy`, userGoal, strings.Join(elementInfo, "\n"))
+
+	log.Printf("Sending vision analysis request to OpenAI GPT-4V with prompt length: %d characters", len(prompt))
 
 	resp, err := ua.openaiClient.CreateChatCompletion(
 		context.Background(),
@@ -568,31 +524,33 @@ func (ua *UIAnalyzer) SelectElementWithAI(labeledImagePath, userGoal string, idT
 				{
 					Role: openai.ChatMessageRoleUser,
 					MultiContent: []openai.ChatMessagePart{
-						{
-							Type: openai.ChatMessagePartTypeText,
-							Text: prompt,
-						},
+						{Type: openai.ChatMessagePartTypeText, Text: prompt},
 						{
 							Type: openai.ChatMessagePartTypeImageURL,
 							ImageURL: &openai.ChatMessageImageURL{
-								URL:    fmt.Sprintf("data:image/png;base64,%s", imageData),
-								Detail: openai.ImageURLDetailHigh,
+								URL: fmt.Sprintf("data:image/png;base64,%s", imageData), Detail: openai.ImageURLDetailHigh,
 							},
 						},
 					},
 				},
 			},
-			MaxTokens:   1000,
-			Temperature: 0.1,
+			MaxTokens: 1000, Temperature: 0.1,
 		},
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI API 호출 실패: %v", err)
+		return nil, fmt.Errorf("OpenAI API request failed - check API key and quota: %v", err)
 	}
 
 	aiResponse := ua.parseAIResponse(resp.Choices[0].Message.Content)
-	log.Printf("✅ AI 선택 완료: ID%d", aiResponse.SelectedID)
+	aiDuration := time.Since(startTime)
+
+	if aiResponse.Error != "" {
+		log.Printf("AI element selection failed in %v - parsing error: %s", aiDuration, aiResponse.Error)
+	} else {
+		log.Printf("AI element selection completed successfully in %v - selected ID: %d, reasoning: %s",
+			aiDuration, aiResponse.SelectedID, aiResponse.Reasoning)
+	}
 
 	return aiResponse, nil
 }
@@ -608,46 +566,37 @@ func (ua *UIAnalyzer) encodeImageToBase64(imagePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	return base64.StdEncoding.EncodeToString(imageData), nil
 }
 
 func (ua *UIAnalyzer) parseAIResponse(responseText string) *AIResponse {
 	var aiResp AIResponse
 
-	// JSON 파싱 시도
-	err := json.Unmarshal([]byte(responseText), &aiResp)
-	if err == nil {
+	if err := json.Unmarshal([]byte(responseText), &aiResp); err == nil {
 		return &aiResp
 	}
 
-	// JSON 블록 추출 시도
 	if strings.Contains(responseText, "```json") {
 		start := strings.Index(responseText, "```json") + 7
 		end := strings.Index(responseText[start:], "```")
 		if end != -1 {
 			jsonStr := responseText[start : start+end]
-			err = json.Unmarshal([]byte(jsonStr), &aiResp)
-			if err == nil {
+			if err := json.Unmarshal([]byte(jsonStr), &aiResp); err == nil {
 				return &aiResp
 			}
 		}
 	}
 
-	// 중괄호 블록 추출 시도
 	start := strings.Index(responseText, "{")
 	end := strings.LastIndex(responseText, "}")
 	if start != -1 && end != -1 && end > start {
 		jsonStr := responseText[start : end+1]
-		err = json.Unmarshal([]byte(jsonStr), &aiResp)
-		if err == nil {
+		if err := json.Unmarshal([]byte(jsonStr), &aiResp); err == nil {
 			return &aiResp
 		}
 	}
 
-	return &AIResponse{
-		Error: fmt.Sprintf("JSON 파싱 실패: %s", responseText),
-	}
+	return &AIResponse{Error: fmt.Sprintf("JSON parsing failed for AI response: %s", responseText)}
 }
 
 func (ua *UIAnalyzer) GetCoordinatesFromID(selectedID int, idToElement map[int]UIElement) *[2]int {
@@ -657,56 +606,53 @@ func (ua *UIAnalyzer) GetCoordinatesFromID(selectedID int, idToElement map[int]U
 	return nil
 }
 
-// ==================== Gin 핸들러들 ====================
-
 var analyzer *UIAnalyzer
 
 func analyzeHandler(c *gin.Context) {
-	// 이미지 파일 업로드 처리
+	requestStart := time.Now()
+	requestID := uuid.New().String()[:8]
+
 	file, err := c.FormFile("image")
 	if err != nil {
+		log.Printf("Request %s failed - missing image file parameter: %v", requestID, err)
 		c.JSON(http.StatusBadRequest, ActionResponse{
-			Success:      false,
-			Reasoning:    "이미지 파일이 필요합니다",
+			Success: false, Reasoning: "Image file parameter required for analysis",
 			ErrorMessage: err.Error(),
 		})
 		return
 	}
 
-	// 사용자 목표
 	userGoal := c.PostForm("user_goal")
 	if userGoal == "" {
+		log.Printf("Request %s failed - missing user_goal parameter", requestID)
 		c.JSON(http.StatusBadRequest, ActionResponse{
-			Success:      false,
-			Reasoning:    "user_goal이 필요합니다",
-			ErrorMessage: "user_goal 파라미터가 없습니다",
+			Success: false, Reasoning: "User goal parameter required for AI selection",
+			ErrorMessage: "user_goal parameter missing from request",
 		})
 		return
 	}
 
-	// 임시 파일 저장
-	tempID := uuid.New().String()
-	originalImagePath := filepath.Join(os.TempDir(), fmt.Sprintf("original_%s.png", tempID))
+	log.Printf("Processing analysis request %s - goal: '%s', image: %s (%.2f KB)",
+		requestID, userGoal, file.Filename, float64(file.Size)/1024)
 
-	err = c.SaveUploadedFile(file, originalImagePath)
-	if err != nil {
+	tempID := uuid.New().String()
+	originalImagePath := filepath.Join(os.TempDir(), fmt.Sprintf("analysis_%s_%s.png", requestID, tempID))
+
+	if err := c.SaveUploadedFile(file, originalImagePath); err != nil {
+		log.Printf("Request %s failed - image save error: %v", requestID, err)
 		c.JSON(http.StatusInternalServerError, ActionResponse{
-			Success:      false,
-			Reasoning:    "이미지 저장 실패",
+			Success: false, Reasoning: "Failed to save uploaded image for processing",
 			ErrorMessage: err.Error(),
 		})
 		return
 	}
 	defer os.Remove(originalImagePath)
 
-	log.Printf("📸 이미지 분석 시작: %s", userGoal)
-
-	// 1. UI 요소 검출
 	elements, err := analyzer.DetectUIElements(originalImagePath)
 	if err != nil {
+		log.Printf("Request %s failed - UI detection error: %v", requestID, err)
 		c.JSON(http.StatusInternalServerError, ActionResponse{
-			Success:      false,
-			Reasoning:    "UI 요소 검출 실패",
+			Success: false, Reasoning: "UI element detection pipeline failed",
 			ErrorMessage: err.Error(),
 		})
 		return
@@ -714,121 +660,119 @@ func analyzeHandler(c *gin.Context) {
 
 	totalElements := len(elements.YOLOObjects) + len(elements.CVButtons) + len(elements.CVInputs)
 	if totalElements == 0 {
+		log.Printf("Request %s completed - no interactive elements detected in image", requestID)
 		c.JSON(http.StatusOK, ActionResponse{
-			Success:   false,
-			Reasoning: "화면에서 클릭 가능한 UI 요소를 찾을 수 없습니다",
+			Success: false, Reasoning: "No clickable UI elements detected in the provided screenshot",
 		})
 		return
 	}
 
-	// 2. 라벨링된 이미지 생성
 	labeledImagePath, idToElement, err := analyzer.CreateLabeledImage(originalImagePath, elements)
 	if err != nil {
+		log.Printf("Request %s failed - image labeling error: %v", requestID, err)
 		c.JSON(http.StatusInternalServerError, ActionResponse{
-			Success:      false,
-			Reasoning:    "라벨링된 이미지 생성 실패",
+			Success: false, Reasoning: "Failed to generate labeled image for AI analysis",
 			ErrorMessage: err.Error(),
 		})
 		return
 	}
 	defer os.Remove(labeledImagePath)
 
-	// 3. AI가 요소 선택
 	selection, err := analyzer.SelectElementWithAI(labeledImagePath, userGoal, idToElement)
 	if err != nil {
+		log.Printf("Request %s failed - AI selection error: %v", requestID, err)
 		c.JSON(http.StatusInternalServerError, ActionResponse{
-			Success:      false,
-			Reasoning:    "AI 분석 실패",
+			Success: false, Reasoning: "AI element selection process failed",
 			ErrorMessage: err.Error(),
 		})
 		return
 	}
 
 	if selection.Error != "" {
+		log.Printf("Request %s failed - AI response parsing error: %s", requestID, selection.Error)
 		c.JSON(http.StatusOK, ActionResponse{
-			Success:      false,
-			Reasoning:    selection.Error,
-			ErrorMessage: selection.Error,
+			Success: false, Reasoning: selection.Error, ErrorMessage: selection.Error,
 		})
 		return
 	}
 
-	// 4. 좌표 추출
 	coordinates := analyzer.GetCoordinatesFromID(selection.SelectedID, idToElement)
 	if coordinates == nil {
+		log.Printf("Request %s failed - invalid element ID selected: %d", requestID, selection.SelectedID)
 		c.JSON(http.StatusOK, ActionResponse{
-			Success:   false,
-			Reasoning: fmt.Sprintf("선택된 ID%d의 좌표를 찾을 수 없습니다", selection.SelectedID),
+			Success: false, Reasoning: fmt.Sprintf("Selected element ID %d not found in detected elements", selection.SelectedID),
 		})
 		return
 	}
 
-	log.Printf("✅ 분석 완료 - 선택된 ID: %d, 좌표: %v", selection.SelectedID, *coordinates)
+	requestDuration := time.Since(requestStart)
+	selectedElement := idToElement[selection.SelectedID]
+	log.Printf("Request %s completed successfully in %v - selected element ID %d (%s) at coordinates %v with confidence %.2f",
+		requestID, requestDuration, selection.SelectedID, selectedElement.Type, *coordinates, selectedElement.Confidence)
 
 	c.JSON(http.StatusOK, ActionResponse{
-		Success:     true,
-		Coordinates: coordinates,
-		Reasoning:   selection.Reasoning,
-		SelectedID:  &selection.SelectedID,
+		Success: true, Coordinates: coordinates, Reasoning: selection.Reasoning, SelectedID: &selection.SelectedID,
 	})
 }
 
 func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"timestamp": time.Now().Unix(),
+		"status": "healthy", "timestamp": time.Now().Unix(),
+		"yolo_initialized":  analyzer != nil && analyzer.yoloDetector != nil,
+		"openai_configured": analyzer != nil && analyzer.openaiClient != nil,
 	})
 }
 
 func rootHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"message":          "지능형 UI 자동화 서버",
-		"status":           "running",
+		"service":          "Intelligent UI Automation Server",
+		"version":          "1.0.0",
+		"status":           "operational",
+		"capabilities":     []string{"YOLO object detection", "OpenCV image processing", "OpenAI element selection"},
 		"openai_available": analyzer.openaiClient != nil,
 	})
 }
 
-// ==================== 메인 함수 ====================
-
 func main() {
-	log.Println("🚀 지능형 UI 자동화 서버 시작")
+	log.Println("Starting Intelligent UI Automation Server with advanced computer vision and AI capabilities...")
+	serverStart := time.Now()
 
-	// 분석 시스템 초기화
 	var err error
 	analyzer, err = NewUIAnalyzer()
 	if err != nil {
-		log.Fatalf("❌ 서버 초기화 실패: %v", err)
+		log.Fatalf("Critical initialization failure - server cannot start: %v", err)
 	}
 	defer analyzer.Close()
 
-	// Gin 설정
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 
-	// CORS 설정
 	config := cors.DefaultConfig()
 	config.AllowAllOrigins = true
 	config.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	config.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
 	r.Use(cors.New(config))
 
-	// 라우트 설정
 	r.GET("/", rootHandler)
 	r.GET("/health", healthHandler)
 	r.POST("/analyze", analyzeHandler)
 
-	// 서버 시작
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8000"
 	}
 
-	log.Printf("📖 API 문서: http://localhost:%s", port)
-	log.Printf("✅ 서버 시작: 포트 %s", port)
+	initDuration := time.Since(serverStart)
+	log.Printf("Server initialization completed in %v - all systems operational", initDuration)
+	log.Printf("API endpoints available:")
+	log.Printf("  GET  / - Service information and capabilities")
+	log.Printf("  GET  /health - Health check and system status")
+	log.Printf("  POST /analyze - UI element analysis and AI selection")
+	log.Printf("Server listening on port %s - ready to process UI automation requests", port)
 
 	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("❌ 서버 시작 실패: %v", err)
+		log.Fatalf("Server startup failed on port %s: %v", port, err)
 	}
 }
